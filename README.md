@@ -126,6 +126,24 @@ Each line object:
 
 > **OBB height note**: the model predicts thin baselines (~1–2 px in heatmap space), so `obb.h` reflects the baseline width, not the full text height. `KrakenPipeline` derives the crop height from inter-line spacing automatically.
 
+## Known limitations
+
+### No mask support
+
+Python Kraken's `segment()` accepts a binary mask image to exclude regions (margins, illustrations, decorations) from segmentation. `KrakenSegmenter.segment()` has no equivalent — every pixel in the image is processed unconditionally. To work around this, crop or blank out regions in the image before passing it to the segmenter.
+
+### Straight-line OBBs only — no polyline baselines
+
+Python Kraken represents each detected text line as a **polyline baseline** (a sequence of (x, y) points that follow the actual path of the text) plus a bounding polygon derived from that polyline. This representation handles curved, wavy, or heavily skewed lines accurately.
+
+`KrakenSegmenter` instead returns a single **oriented bounding rectangle** (OBB) per line, computed via PCA on the connected-component pixels in the heatmap. This works well for straight or gently diagonal lines but has these trade-offs:
+
+- Curved or wavy baselines are approximated as a single best-fit rectangle; the approximation degrades as curvature increases.
+- `corners` is always a 4-point rectangle, not a line-hugging polygon.
+- Very long or highly skewed lines may produce a poor bounding box if the PCA axis does not align with the true reading direction.
+
+If your documents contain significantly curved text, consider contributing polyline baseline extraction or using the Python Kraken pipeline for segmentation and this library only for recognition.
+
 ### Full pipeline
 
 ```js
@@ -236,6 +254,19 @@ tests/
 
 export_kraken_onnx.py   Python export script (requires a Kraken-capable venv)
 ```
+
+## Demo
+
+An interactive browser demo is available on GitHub Pages. Load the sample manuscript page or upload your own image, and run the full segmentation + recognition pipeline entirely client-side.
+
+## Acknowledgements
+
+This JavaScript runtime is built on top of [Kraken](https://github.com/mittagessen/kraken), the OCR/HTR engine created and maintained by [Benjamin Kiessling](https://github.com/mittagessen).
+
+The project *Corpus Liberatum Linguae Graecae* was supported by the French National Research Agency (ANR) under the France 2030 grant reference number « ANR-24-RRII-0002 » operated by the Inria Quadrant Program.
+
+Project Leader: Thibault Clérice.
+Project Members: Nicolas Angleraud, Antonia Karamolegkou, Benoît Sagot.
 
 ## License
 

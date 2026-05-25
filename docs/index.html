@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>kraken-js — OCR/HTR Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Georgia', serif;
+      background: #f5f0e8;
+      color: #2c2416;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #2c2416;
+      color: #f5f0e8;
+      padding: 1.5rem 2rem;
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+    }
+    header h1 { font-size: 1.6rem; font-weight: normal; letter-spacing: 0.04em; }
+    header p  { font-size: 0.9rem; opacity: 0.7; }
+
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+
+    @media (max-width: 760px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    section { display: flex; flex-direction: column; gap: 1rem; }
+
+    h2 {
+      font-size: 1rem;
+      font-weight: normal;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #7a6a50;
+      border-bottom: 1px solid #c8b89a;
+      padding-bottom: 0.4rem;
+    }
+
+    #canvas-container {
+      position: relative;
+      background: white;
+      border: 2px dashed #c8b89a;
+      min-height: 300px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s, background 0.15s;
+      cursor: pointer;
+    }
+
+    #canvas-container.drag-over {
+      border-color: #7a6a50;
+      background: #f0e8d8;
+    }
+
+    #canvas-container canvas {
+      max-width: 100%;
+      display: block;
+    }
+
+    #canvas-placeholder {
+      color: #b0a090;
+      font-style: italic;
+      font-size: 0.9rem;
+      text-align: center;
+      padding: 2rem;
+      pointer-events: none;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    button {
+      background: #2c2416;
+      color: #f5f0e8;
+      border: none;
+      padding: 0.5rem 1.2rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+    }
+    button:hover  { background: #4a3c28; }
+    button:disabled { background: #8a7a60; cursor: default; }
+
+    label.file-btn {
+      background: #5a4a32;
+      color: #f5f0e8;
+      padding: 0.5rem 1.2rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    label.file-btn:hover { background: #7a6a50; }
+    label.file-btn input { display: none; }
+
+    #status {
+      font-size: 0.85rem;
+      color: #7a6a50;
+      font-style: italic;
+      min-height: 1.2em;
+    }
+    #status.error { color: #9a2a2a; }
+
+    #transcription {
+      background: white;
+      border: 1px solid #c8b89a;
+      padding: 1rem;
+      min-height: 300px;
+      max-height: 560px;
+      overflow-y: auto;
+      font-size: 0.9rem;
+      line-height: 1.7;
+    }
+
+    .line-result {
+      display: flex;
+      gap: 0.5rem;
+      align-items: baseline;
+      padding: 0.15rem 0;
+      border-bottom: 1px solid #f0e8d8;
+    }
+
+    .line-num {
+      font-size: 0.7rem;
+      color: #b0a090;
+      min-width: 2em;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    .line-text {
+      flex: 1;
+      unicode-bidi: plaintext;
+    }
+
+    #transcription p.empty {
+      color: #b0a090;
+      font-style: italic;
+    }
+
+    #overlay-toggle {
+      font-size: 0.8rem;
+      padding: 0.4rem 0.8rem;
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding: 1.5rem 2rem;
+      font-size: 0.8rem;
+      color: #7a6a50;
+      border-top: 1px solid #c8b89a;
+      line-height: 1.8;
+    }
+    footer a { color: #5a4a32; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>kraken-js</h1>
+    <p>OCR/HTR in the browser — segmentation + recognition</p>
+  </header>
+
+  <div id="greek-notice" style="background:#7a4a20;color:#f5f0e8;padding:0.6rem 2rem;font-size:0.85rem;">
+    ⚠ The bundled models are trained on Greek manuscripts. Results on other scripts or languages will be meaningless.
+  </div>
+
+  <main>
+    <section id="image-panel">
+      <h2>Page Image</h2>
+      <div id="canvas-container">
+        <canvas id="page-canvas" style="display:none"></canvas>
+        <span id="canvas-placeholder">Drop an image here, or use the buttons below</span>
+      </div>
+
+      <div class="controls">
+        <button id="btn-sample">Load sample page</button>
+        <label class="file-btn">
+          Upload image
+          <input type="file" id="file-input" accept="image/*" />
+        </label>
+        <button id="btn-run" disabled>Run OCR</button>
+        <button id="overlay-toggle" disabled>Toggle overlay</button>
+      </div>
+
+      <div id="status">Models not loaded.</div>
+    </section>
+
+    <section id="text-panel">
+      <h2>Transcription</h2>
+      <div id="transcription">
+        <p class="empty">Transcription will appear here after running OCR.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <strong>kraken-js</strong> is a JavaScript runtime for
+    <a href="https://github.com/mittagessen/kraken" target="_blank" rel="noopener">Kraken</a>
+    OCR/HTR models by
+    <a href="https://github.com/mittagessen" target="_blank" rel="noopener">Benjamin Kiessling</a>,
+    running ONNX models in the browser via
+    <a href="https://onnxruntime.ai" target="_blank" rel="noopener">ONNX Runtime Web</a>.<br /><br />
+
+    <strong>Known limitations:</strong>
+    Line detection uses oriented bounding rectangles (OBBs) derived from PCA — curved or wavy
+    baselines are approximated as a straight rectangle, which may degrade accuracy on highly
+    curved text. Region masking (excluding margins or illustrations from segmentation) is not
+    supported; the full image is always processed.<br /><br />
+
+    The project <em>Corpus Liberatum Linguae Graecae</em> was supported by the French National
+    Research Agency (ANR) under the France 2030 grant reference number « ANR-24-RRII-0002 »
+    operated by the Inria Quadrant Program.
+    Project Leader: Thibault Clérice.
+    Project Members: Nicolas Angleraud, Antonia Karamolegkou, Benoît Sagot.
+  </footer>
+
+  <!-- JSZip for unpacking .js_mlmodel archives -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <script type="module">
+    import { runPipeline } from './demo.js';
+
+    const SEG_URL = './models/segmentation.js_mlmodel';
+    const REC_URL = './models/model_best.js_mlmodel';
+    const SAMPLE_URL = './models/fullpage.png';
+
+    const canvas    = document.getElementById('page-canvas');
+    const placeholder = document.getElementById('canvas-placeholder');
+    const btnSample = document.getElementById('btn-sample');
+    const btnRun    = document.getElementById('btn-run');
+    const fileInput = document.getElementById('file-input');
+    const statusEl  = document.getElementById('status');
+    const transEl   = document.getElementById('transcription');
+    const overlayBtn = document.getElementById('overlay-toggle');
+
+    const ctx = canvas.getContext('2d');
+    let currentImg = null;
+    let overlayLines = null;
+    let showOverlay = false;
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
+
+    function renderImage(img) {
+      currentImg = img;
+      canvas.width  = img.naturalWidth  || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      ctx.drawImage(img, 0, 0);
+      canvas.style.display = 'block';
+      placeholder.style.display = 'none';
+      btnRun.disabled = false;
+      overlayLines = null;
+      showOverlay = false;
+      overlayBtn.disabled = true;
+    }
+
+    function drawOverlay() {
+      if (!currentImg) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(currentImg, 0, 0);
+      if (!showOverlay || !overlayLines) return;
+      ctx.strokeStyle = 'rgba(220, 60, 30, 0.7)';
+      ctx.lineWidth   = 2;
+      for (const { obb } of overlayLines) {
+        const c = obb.corners;
+        ctx.beginPath();
+        ctx.moveTo(c[0][0], c[0][1]);
+        for (let i = 1; i < c.length; i++) ctx.lineTo(c[i][0], c[i][1]);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+
+    overlayBtn.addEventListener('click', () => {
+      showOverlay = !showOverlay;
+      overlayBtn.textContent = showOverlay ? 'Hide overlay' : 'Toggle overlay';
+      drawOverlay();
+    });
+
+    function loadImageFromUrl(url) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload  = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to load ${url}`));
+        img.src = url;
+      });
+    }
+
+    btnSample.addEventListener('click', async () => {
+      btnSample.disabled = true;
+      setStatus('Loading sample image…');
+      try {
+        const img = await loadImageFromUrl(SAMPLE_URL);
+        renderImage(img);
+        setStatus('Sample loaded. Press Run OCR.');
+      } catch (e) {
+        setStatus('Failed to load sample: ' + e.message, true);
+      } finally {
+        btnSample.disabled = false;
+      }
+    });
+
+    async function loadFile(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        setStatus('Please drop an image file.', true);
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      const img = await loadImageFromUrl(url);
+      renderImage(img);
+      transEl.innerHTML = '<p class="empty">Transcription will appear here after running OCR.</p>';
+      setStatus('Image loaded. Press Run OCR.');
+    }
+
+    fileInput.addEventListener('change', () => loadFile(fileInput.files[0]));
+
+    const dropZone = document.getElementById('canvas-container');
+
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropZone.classList.add('drag-over');
+    });
+
+    dropZone.addEventListener('dragleave', e => {
+      if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drag-over');
+    });
+
+    dropZone.addEventListener('drop', async e => {
+      e.preventDefault();
+      dropZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      await loadFile(file);
+    });
+
+    dropZone.addEventListener('click', e => {
+      if (e.target === canvas) return;
+      fileInput.click();
+    });
+
+    btnRun.addEventListener('click', async () => {
+      if (!currentImg) return;
+      btnRun.disabled = true;
+      btnSample.disabled = true;
+      transEl.innerHTML = '';
+      overlayLines = [];
+      showOverlay = false;
+      overlayBtn.disabled = true;
+
+      try {
+        let lineCount = 0;
+        await runPipeline(currentImg, SEG_URL, REC_URL, {
+          onStatus: msg => setStatus(msg),
+          onLine: ({ obb, type, text }) => {
+            overlayLines.push({ obb, type });
+            lineCount++;
+            const div = document.createElement('div');
+            div.className = 'line-result';
+            div.innerHTML = `<span class="line-num">${lineCount}</span><span class="line-text">${escHtml(text)}</span>`;
+            transEl.appendChild(div);
+            transEl.scrollTop = transEl.scrollHeight;
+          },
+        });
+        overlayBtn.disabled = false;
+        setStatus(`Done — ${lineCount} line${lineCount !== 1 ? 's' : ''} recognized.`);
+      } catch (e) {
+        setStatus('Error: ' + e.message, true);
+        console.error(e);
+      } finally {
+        btnRun.disabled = false;
+        btnSample.disabled = false;
+      }
+    });
+
+    function escHtml(str) {
+      return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    setStatus('Ready — load an image to begin.');
+  </script>
+</body>
+</html>
