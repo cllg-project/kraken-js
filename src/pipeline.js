@@ -25,8 +25,15 @@ class KrakenPipeline {
     const { lines, imageSize } = await this._segmenter.segment(imageBuffer);
     if (lines.length === 0) return [];
 
+    // The model predicts thin baselines (~1–2px in heatmap space), so obb.h is
+    // meaningless as a line height. Estimate from median inter-baseline spacing.
+    const lineHeight = estimateLineHeight(lines, imageSize);
+    const topline = this._segmenter._meta.topline || false;
+
     const crops = await Promise.all(
-      lines.map(({ obb }) => extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height))
+      lines.map(({ obb }) =>
+        extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline)
+      )
     );
 
     const recognized = await Promise.all(crops.map(crop => this._recognizer.recognize(crop)));
@@ -41,20 +48,42 @@ class KrakenPipeline {
 }
 
 /**
- * Extract a deskewed line crop from a full-page image buffer.
- * Crops the axis-aligned bbox of the OBB corners (with padding), then rotates.
+ * Estimate line height from the median gap between consecutive baseline cy values.
+ * Falls back to imageHeight/30 when there are too few lines.
  */
-async function extractLineCrop(imageBuffer, obb, origW, origH) {
-  const { h, angle, corners } = obb;
+function estimateLineHeight(lines, imageSize) {
+  if (lines.length < 2) return Math.round(imageSize.height / 30);
+  const cys = lines.map(l => l.obb.cy).slice().sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < cys.length; i++) {
+    const g = cys[i] - cys[i - 1];
+    if (g > 0) gaps.push(g);
+  }
+  if (gaps.length === 0) return Math.round(imageSize.height / 30);
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
 
-  const xs = corners.map(c => c[0]);
-  const ys = corners.map(c => c[1]);
-  const pad = Math.ceil(Math.max(h * 0.15, 5));
+/**
+ * Extract a deskewed line crop from a full-page image buffer.
+ *
+ * Uses estimated line height (not obb.h, which is just the baseline width) to
+ * determine the vertical crop extent. For topline=false (Kraken default), text
+ * sits above the baseline → expand mostly upward.
+ */
+async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topline) {
+  const { cx, cy, angle, corners } = obb;
 
-  const left   = Math.max(0, Math.floor(Math.min(...xs)) - pad);
-  const top    = Math.max(0, Math.floor(Math.min(...ys)) - pad);
-  const right  = Math.min(origW - 1, Math.ceil(Math.max(...xs)) + pad);
-  const bottom = Math.min(origH - 1, Math.ceil(Math.max(...ys)) + pad);
+  const expandUp   = topline ? lineHeight * 0.25 : lineHeight * 0.85;
+  const expandDown = topline ? lineHeight * 0.85 : lineHeight * 0.25;
+
+  const xs  = corners.map(c => c[0]);
+  const hPad = Math.ceil(lineHeight * 0.1);
+
+  const left   = Math.max(0, Math.floor(Math.min(...xs)) - hPad);
+  const top    = Math.max(0, Math.floor(cy - expandUp));
+  const right  = Math.min(origW - 1, Math.ceil(Math.max(...xs)) + hPad);
+  const bottom = Math.min(origH - 1, Math.ceil(cy + expandDown));
 
   const cropW = Math.max(1, right - left);
   const cropH = Math.max(1, bottom - top);
