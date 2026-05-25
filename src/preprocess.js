@@ -115,4 +115,50 @@ function toChw(tensor, channels) {
   return out;
 }
 
-module.exports = { preprocessImage, buildBatch, toChw };
+/**
+ * Preprocess a full-page image for Kraken segmentation inference.
+ *
+ * @param {string|Buffer} image   Path or raw Buffer
+ * @param {object}        meta    {height, channels, one_channel_mode}
+ * @returns {Promise<{data: Float32Array, width: number, height: number, actualChannels: number}>}
+ */
+async function preprocessPageImage(image, meta) {
+  const { height } = meta;
+  const oneChannelMode = meta.one_channel_mode;
+
+  if (oneChannelMode === '1') {
+    // Binarize: grayscale → Otsu threshold, then broadcast to 3-channel HWC float
+    const { data: buf, info } = await sharp(image, { failOn: 'none' })
+      .grayscale().threshold()
+      .resize({ height, fit: 'outside', kernel: 'lanczos3' })
+      .raw().toBuffer({ resolveWithObject: true });
+    const nPix = info.width * info.height;
+    const floatData = new Float32Array(nPix * 3);
+    for (let i = 0; i < nPix; i++) {
+      const v = buf[i] / 255.0;
+      floatData[i * 3]     = v;
+      floatData[i * 3 + 1] = v;
+      floatData[i * 3 + 2] = v;
+    }
+    return { data: floatData, width: info.width, height: info.height, actualChannels: 3 };
+  }
+
+  let pipeline = sharp(image, { failOn: 'none' });
+  if (meta.channels === 1) {
+    pipeline = pipeline.grayscale();
+  } else {
+    pipeline = pipeline.toColorspace('srgb').removeAlpha();
+  }
+  pipeline = pipeline.resize({ height, fit: 'outside', kernel: 'lanczos3' });
+
+  const { data: buf, info } = await pipeline.raw().toBuffer({ resolveWithObject: true });
+  const nPix = info.width * info.height * info.channels;
+  const floatData = new Float32Array(nPix);
+  for (let i = 0; i < nPix; i++) {
+    floatData[i] = buf[i] / 255.0;
+  }
+
+  return { data: floatData, width: info.width, height: info.height, actualChannels: info.channels };
+}
+
+module.exports = { preprocessImage, preprocessPageImage, buildBatch, toChw };
