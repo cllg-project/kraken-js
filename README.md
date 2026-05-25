@@ -28,11 +28,11 @@ model.onnx       ONNX graph (dynamic batch + width axes)
 metadata.json    model configuration (see below)
 ```
 
-Export a Kraken `.mlmodel` or `.safetensors` model with the provided Python script:
+Export a Kraken `.mlmodel` or `.safetensors` model with the provided Python script (requires a Kraken Python environment):
 
 ```bash
-# Install Kraken into the project venv (once)
-env/bin/pip install -e "."
+# Install Kraken into a venv (once)
+python3 -m venv env && env/bin/pip install kraken
 
 # Recognition model
 env/bin/python3 export_kraken_onnx.py model_best.mlmodel
@@ -41,6 +41,9 @@ env/bin/python3 export_kraken_onnx.py model_best.mlmodel
 # Segmentation model
 env/bin/python3 export_kraken_onnx.py segmentation.mlmodel
 # → segmentation.js_mlmodel
+
+# Custom output path
+env/bin/python3 export_kraken_onnx.py model.mlmodel /path/to/output.js_mlmodel
 ```
 
 ### Recognition metadata
@@ -231,7 +234,7 @@ tests/
     example.txt                 ground-truth transcription of fullpage.png
     *.xml                       ALTO XML ground-truth segmentation
 
-export_kraken_onnx.py   Python export script (run from the kraken repo root)
+export_kraken_onnx.py   Python export script (requires a Kraken-capable venv)
 ```
 
 ## License
