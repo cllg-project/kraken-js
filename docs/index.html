@@ -249,6 +249,11 @@
         <button id="overlay-toggle" disabled>Toggle overlay</button>
       </div>
 
+      <label style="font-size:0.8rem;color:#7a6a50;display:flex;align-items:center;gap:0.4rem;user-select:none;">
+        <input type="checkbox" id="no-column-split" />
+        Disable double-page column detection
+      </label>
+
       <div id="status">Models not loaded.</div>
     </section>
 
@@ -300,7 +305,8 @@
     const fileInput = document.getElementById('file-input');
     const statusEl  = document.getElementById('status');
     const transEl   = document.getElementById('transcription');
-    const overlayBtn = document.getElementById('overlay-toggle');
+    const overlayBtn      = document.getElementById('overlay-toggle');
+    const noColumnSplitCb = document.getElementById('no-column-split');
 
     const ctx = canvas.getContext('2d');
     let currentImg = null;
@@ -424,6 +430,7 @@
       try {
         let lineCount = 0;
         await runPipeline(currentImg, SEG_URL, REC_URL, {
+          noColumnSplit: noColumnSplitCb.checked,
           onStatus: msg => setStatus(msg),
           onLine: ({ obb, type, text, cropBounds }) => {
             overlayLines.push({ obb, type, cropBounds });

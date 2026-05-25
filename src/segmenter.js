@@ -4,7 +4,7 @@ const { loadJsMlmodel } = require('./loader');
 const { preprocessPageImage, toChw } = require('./preprocess');
 const {
   maxChannels, threshold, connectedComponents,
-  extractOrientedBBoxes, scaleOBBs,
+  extractOrientedBBoxes, scaleOBBs, sortByReadingOrder,
 } = require('./heatmap');
 
 class KrakenSegmenter {
@@ -81,8 +81,11 @@ class KrakenSegmenter {
       return { obb, type: channelToClass[bestChannel] || 'DefaultLine' };
     });
 
-    // Sort by reading order: cy ascending, then cx ascending
-    lines.sort((a, b) => a.obb.cy !== b.obb.cy ? a.obb.cy - b.obb.cy : a.obb.cx - b.obb.cx);
+    const tagged   = lines.map((l, i) => ({ ...l.obb, _i: i }));
+    const ordered  = sortByReadingOrder(tagged, origW, origH, this._opts.noColumnSplit);
+    const sortedLines = ordered.map(o => lines[o._i]);
+    lines.length = 0;
+    lines.push(...sortedLines);
 
     return { lines, imageSize: { width: origW, height: origH } };
   }

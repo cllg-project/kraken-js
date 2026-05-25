@@ -294,6 +294,33 @@ function extractOrientedBBoxes(labels, count, H, W, minArea = 20) {
   return results;
 }
 
+function findColumnSplit(obbs, imageWidth, imageHeight) {
+  if (obbs.length < 4) return null;
+  if (imageHeight && imageWidth / imageHeight < 1.2) return null;
+  const lo = imageWidth * 0.3, hi = imageWidth * 0.7;
+  const cxs = obbs.map(o => o.cx).sort((a, b) => a - b);
+  let maxGap = 0, splitX = null;
+  for (let i = 1; i < cxs.length; i++) {
+    const mid = (cxs[i] + cxs[i - 1]) / 2;
+    if (mid < lo || mid > hi) continue;
+    const gap = cxs[i] - cxs[i - 1];
+    if (gap > maxGap) { maxGap = gap; splitX = mid; }
+  }
+  return (splitX !== null && maxGap > imageWidth * 0.05) ? splitX : null;
+}
+
+function sortByReadingOrder(obbs, imageWidth, imageHeight, noColumnSplit) {
+  if (!noColumnSplit && imageWidth) {
+    const split = findColumnSplit(obbs, imageWidth, imageHeight);
+    if (split !== null) {
+      const left  = obbs.filter(o => o.cx <= split).sort((a, b) => a.cy - b.cy);
+      const right = obbs.filter(o => o.cx >  split).sort((a, b) => a.cy - b.cy);
+      return [...left, ...right];
+    }
+  }
+  return [...obbs].sort((a, b) => a.cy !== b.cy ? a.cy - b.cy : a.cx - b.cx);
+}
+
 function scaleOBBs(obbs, scaleX, scaleY, imageW, imageH) {
   return obbs.map(obb => ({
     ...obb,
@@ -374,14 +401,15 @@ function decodeCodec(ctcLabels, l2c) {
 // ---------------------------------------------------------------------------
 
 class BrowserSegmenter {
-  constructor(session, meta) {
-    this._session = session;
-    this._meta    = meta;
+  constructor(session, meta, opts = {}) {
+    this._session       = session;
+    this._meta          = meta;
+    this._noColumnSplit = opts.noColumnSplit || false;
   }
 
-  static async create(url) {
+  static async create(url, opts = {}) {
     const { session, meta } = await loadJsMlmodel(url);
-    return new BrowserSegmenter(session, meta);
+    return new BrowserSegmenter(session, meta, opts);
   }
 
   async segment(imgEl) {
@@ -414,8 +442,7 @@ class BrowserSegmenter {
     const classMap = this._meta.class_mapping.baselines;
     const classEntries = Object.entries(classMap); // [[name, idx], ...]
 
-    const lines = obbs
-      .sort((a, b) => a.cy !== b.cy ? a.cy - b.cy : a.cx - b.cx)
+    const lines = sortByReadingOrder(obbs, origW, origH, this._noColumnSplit)
       .map(obb => {
         // find dominant baseline class for this component
         let bestType = classEntries[0][0];
@@ -550,10 +577,10 @@ function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topl
  * @param {{ onStatus?: (msg:string)=>void, onLine?: (line:object)=>void }} opts
  */
 export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
-  const { onStatus = () => {}, onLine = () => {} } = opts;
+  const { onStatus = () => {}, onLine = () => {}, noColumnSplit = false } = opts;
 
   onStatus('Loading segmentation model…');
-  const segmenter = await BrowserSegmenter.create(segUrl);
+  const segmenter = await BrowserSegmenter.create(segUrl, { noColumnSplit });
 
   onStatus('Loading recognition model…');
   const recognizer = await BrowserRecognizer.create(recUrl);

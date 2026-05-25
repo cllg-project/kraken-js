@@ -200,9 +200,58 @@ function extractOrientedBBoxes(labels, count, H, W, minArea = 20) {
 }
 
 /**
- * Sort OBBs by reading order: cy ascending (top to bottom), then cx ascending (left to right).
+ * Look for a vertical gutter between two page columns.
+ *
+ * Only activates on landscape images (width > height * 1.2), which is the
+ * typical aspect ratio of a double-page spread. Finds the largest cx gap
+ * whose midpoint falls in the middle 40% of the image; returns the split
+ * x-coordinate if the gap exceeds 5% of image width, otherwise null.
+ *
+ * @param {Array<{cx: number}>} obbs
+ * @param {number} imageWidth
+ * @param {number} imageHeight
+ * @returns {number|null}
  */
-function sortByReadingOrder(obbs) {
+function findColumnSplit(obbs, imageWidth, imageHeight) {
+  if (obbs.length < 4) return null;
+  if (imageHeight && imageWidth / imageHeight < 1.2) return null;
+  const lo = imageWidth * 0.3;
+  const hi = imageWidth * 0.7;
+  const cxs = obbs.map(o => o.cx).sort((a, b) => a - b);
+
+  let maxGap = 0, splitX = null;
+  for (let i = 1; i < cxs.length; i++) {
+    const mid = (cxs[i] + cxs[i - 1]) / 2;
+    if (mid < lo || mid > hi) continue;
+    const gap = cxs[i] - cxs[i - 1];
+    if (gap > maxGap) { maxGap = gap; splitX = mid; }
+  }
+  return (splitX !== null && maxGap > imageWidth * 0.05) ? splitX : null;
+}
+
+/**
+ * Sort OBBs by reading order.
+ *
+ * When imageSize is supplied and the image is landscape, looks for a vertical
+ * gutter (double-page spread). If found, left and right columns are each sorted
+ * by cy independently and concatenated (left first). Pass noColumnSplit:true to
+ * disable this detection and always use a plain cy-then-cx sort.
+ *
+ * @param {Array<OBB>} obbs
+ * @param {number} [imageWidth]
+ * @param {number} [imageHeight]
+ * @param {boolean} [noColumnSplit]
+ * @returns {Array<OBB>}
+ */
+function sortByReadingOrder(obbs, imageWidth, imageHeight, noColumnSplit) {
+  if (!noColumnSplit && imageWidth) {
+    const split = findColumnSplit(obbs, imageWidth, imageHeight);
+    if (split !== null) {
+      const left  = obbs.filter(o => o.cx <= split).sort((a, b) => a.cy - b.cy);
+      const right = obbs.filter(o => o.cx >  split).sort((a, b) => a.cy - b.cy);
+      return [...left, ...right];
+    }
+  }
   return [...obbs].sort((a, b) => a.cy !== b.cy ? a.cy - b.cy : a.cx - b.cx);
 }
 
@@ -238,4 +287,5 @@ module.exports = {
   // exported for testing
   computeOBB,
   eig2x2,
+  findColumnSplit,
 };
