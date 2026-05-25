@@ -126,23 +126,26 @@ Each line object:
 
 > **OBB height note**: the model predicts thin baselines (~1–2 px in heatmap space), so `obb.h` reflects the baseline width, not the full text height. `KrakenPipeline` derives the crop height from inter-line spacing automatically.
 
-## Known limitations
+#### Reading order and double-page spreads
 
-### No mask support
+Lines are returned sorted top-to-bottom, left-to-right by default. When a landscape image (width > height × 1.2) is detected, `KrakenSegmenter` looks for a vertical gutter in the centre of the page — a horizontal gap in the distribution of line centres. If one is found, lines are split into left and right columns, each sorted independently by their vertical position, and concatenated (left column first).
 
-Python Kraken's `segment()` accepts a binary mask image to exclude regions (margins, illustrations, decorations) from segmentation. `KrakenSegmenter.segment()` has no equivalent — every pixel in the image is processed unconditionally. To work around this, crop or blank out regions in the image before passing it to the segmenter.
+To disable this heuristic — for example when a wide single page is mistakenly split, or for right-to-left scripts — pass `noColumnSplit: true`:
 
-### Straight-line OBBs only — no polyline baselines
+```js
+const seg = await KrakenSegmenter.create('./segmentation.js_mlmodel', {
+  noColumnSplit: true,
+});
+```
 
-Python Kraken represents each detected text line as a **polyline baseline** (a sequence of (x, y) points that follow the actual path of the text) plus a bounding polygon derived from that polyline. This representation handles curved, wavy, or heavily skewed lines accurately.
+Other segmenter options:
 
-`KrakenSegmenter` instead returns a single **oriented bounding rectangle** (OBB) per line, computed via PCA on the connected-component pixels in the heatmap. This works well for straight or gently diagonal lines but has these trade-offs:
-
-- Curved or wavy baselines are approximated as a single best-fit rectangle; the approximation degrades as curvature increases.
-- `corners` is always a 4-point rectangle, not a line-hugging polygon.
-- Very long or highly skewed lines may produce a poor bounding box if the PCA axis does not align with the true reading direction.
-
-If your documents contain significantly curved text, consider contributing polyline baseline extraction or using the Python Kraken pipeline for segmentation and this library only for recognition.
+| Option | Default | Description |
+|--------|---------|-------------|
+| `threshold` | `0.5` | Sigmoid threshold for baseline heatmap binarisation |
+| `minArea` | `20` | Minimum connected-component area in heatmap pixels |
+| `noColumnSplit` | `false` | Disable double-page column detection |
+| `executionProviders` | `['cpu']` | ONNX Runtime execution providers |
 
 ### Full pipeline
 
@@ -215,6 +218,22 @@ All models share the same normalization: pixels are divided by 255 then inverted
 | Padding | `pad` px white on each side | none |
 | Normalize | `1 − x/255` | `1 − x/255` |
 | Layout | CHW Float32 | CHW Float32 |
+
+## Known limitations
+
+### No mask support
+
+Python Kraken's `segment()` accepts a binary mask image to exclude regions (margins, illustrations, decorations) from segmentation. `KrakenSegmenter.segment()` has no equivalent — every pixel in the image is processed unconditionally. To work around this, crop or blank out regions in the image before passing it to the segmenter.
+
+### Straight-line OBBs only — no polyline baselines
+
+Python Kraken represents each detected text line as a **polyline baseline** (a sequence of (x, y) points that follow the actual path of the text) plus a bounding polygon derived from that polyline. This handles curved, wavy, or heavily skewed lines accurately.
+
+`KrakenSegmenter` instead returns a single **oriented bounding rectangle** (OBB) per line, computed via PCA on the connected-component pixels in the heatmap. This works well for straight or gently diagonal lines but:
+
+- Curved or wavy baselines are approximated as a single best-fit rectangle; the approximation degrades as curvature increases.
+- `corners` is always a 4-point rectangle, not a line-hugging polygon.
+- Very long or highly skewed lines may produce a poor bounding box if the PCA axis does not align with the true reading direction.
 
 ## Running tests
 
