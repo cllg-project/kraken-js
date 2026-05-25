@@ -1,0 +1,16 @@
+{
+  "name": "kraken-js",
+  "version": "0.1.0",
+  "description": "Kraken OCR recognition model runner for Node.js / Electron",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:smoke": "node test.js"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "onnxruntime-node": "^1.21.0",
+    "sharp": "^0.34.2"
+  }
+}
