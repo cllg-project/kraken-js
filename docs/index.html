@@ -329,15 +329,18 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(currentImg, 0, 0);
       if (!showOverlay || !overlayLines) return;
-      ctx.strokeStyle = 'rgba(220, 60, 30, 0.7)';
-      ctx.lineWidth   = 2;
-      for (const { obb } of overlayLines) {
-        const c = obb.corners;
-        ctx.beginPath();
-        ctx.moveTo(c[0][0], c[0][1]);
-        for (let i = 1; i < c.length; i++) ctx.lineTo(c[i][0], c[i][1]);
-        ctx.closePath();
-        ctx.stroke();
+      // Scale line width so it's ~2px on screen regardless of canvas zoom
+      const displayScale = canvas.offsetWidth / canvas.width;
+      const lw = Math.max(1, Math.round(1.5 / displayScale));
+      ctx.strokeStyle = 'rgba(220, 60, 30, 0.85)';
+      ctx.fillStyle   = 'rgba(220, 60, 30, 0.08)';
+      ctx.lineWidth   = lw;
+      for (const { cropBounds } of overlayLines) {
+        if (!cropBounds) continue;
+        const { left, top, right, bottom } = cropBounds;
+        const w = right - left, h = bottom - top;
+        ctx.fillRect(left, top, w, h);
+        ctx.strokeRect(left, top, w, h);
       }
     }
 
@@ -421,8 +424,8 @@
         let lineCount = 0;
         await runPipeline(currentImg, SEG_URL, REC_URL, {
           onStatus: msg => setStatus(msg),
-          onLine: ({ obb, type, text }) => {
-            overlayLines.push({ obb, type });
+          onLine: ({ obb, type, text, cropBounds }) => {
+            overlayLines.push({ obb, type, cropBounds });
             lineCount++;
             const div = document.createElement('div');
             div.className = 'line-result';

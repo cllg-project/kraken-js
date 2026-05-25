@@ -505,6 +505,8 @@ function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topl
 
   const cropW = Math.max(1, right - left);
   const cropH = Math.max(1, bottom - top);
+  // bounds exposed for overlay drawing
+  extractLineCropCanvas._lastBounds = { left, top, right, bottom };
 
   const c   = document.createElement('canvas');
   const ctx = c.getContext('2d');
@@ -582,9 +584,10 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
       imageSize.width, imageSize.height,
       lineHeight, topline
     );
+    const cropBounds = { ...extractLineCropCanvas._lastBounds };
 
     const { text, chars } = await recognizer.recognize(cropCanvas);
-    const result = { obb, type, text, chars };
+    const result = { obb, type, text, chars, cropBounds };
     results.push(result);
     onLine(result);
   }
