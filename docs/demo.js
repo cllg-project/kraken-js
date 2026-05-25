@@ -13,6 +13,7 @@
 // ort is loaded as a UMD global via <script> tag in index.html.
 // Set wasmPaths so the runtime can fetch its .wasm workers from the same CDN.
 /* global ort */
+// Point to the same CDN so the .wasm worker files are fetched from there
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
 
 // ---------------------------------------------------------------------------
@@ -574,10 +575,13 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
   const lineHeight = estimateLineHeight(lines, imageSize);
   const topline    = segmenter._meta.topline || false;
 
+  const yield_ = () => new Promise(r => setTimeout(r, 0));
+
   const results = [];
   for (let i = 0; i < lines.length; i++) {
     const { obb, type } = lines[i];
     onStatus(`Recognizing line ${i + 1} / ${lines.length}…`);
+    await yield_(); // release the main thread so the browser can repaint
 
     const cropCanvas = extractLineCropCanvas(
       sourceCanvas, obb,
