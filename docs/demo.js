@@ -10,8 +10,9 @@
  * src/recognizer.js, src/preprocess.js, src/heatmap.js and src/decode.js.
  */
 
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.esm.min.js';
-
+// ort is loaded as a UMD global via <script> tag in index.html.
+// Set wasmPaths so the runtime can fetch its .wasm workers from the same CDN.
+/* global ort */
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
 
 // ---------------------------------------------------------------------------
