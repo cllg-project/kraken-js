@@ -137,7 +137,7 @@ async function preprocessPageImage(image, meta) {
   const nPix = info.width * info.height * info.channels;
   const floatData = new Float32Array(nPix);
   for (let i = 0; i < nPix; i++) {
-    floatData[i] = buf[i] / 255.0;
+    floatData[i] = 1.0 - buf[i] / 255.0;
   }
 
   return { data: floatData, width: info.width, height: info.height, actualChannels: info.channels };
