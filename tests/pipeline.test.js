@@ -97,3 +97,53 @@ describe('process OBB correctness', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// process — content regression
+//
+// These tests guard against preprocessing regressions (e.g. missing inversion)
+// that silently reduce line-detection quality without breaking structural checks.
+// Expected strings are NFD-normalised to match the codec's decomposed diacritics.
+// ---------------------------------------------------------------------------
+
+describe('process content regression', () => {
+  let fullText;
+
+  before(() => {
+    fullText = results.map(r => r.text).join('\n').normalize('NFD');
+  });
+
+  // The ALTO ground truth has 39 lines (incl. margin numbers). A correct
+  // segmentation yields 35. Polarity-inverted input drops to ~31.
+  test('line count matches ALTO segmentation (≥ 33)', () => {
+    assert.ok(results.length >= 33,
+      `expected ≥ 33 lines, got ${results.length} — possible preprocessing regression`);
+  });
+
+  // Lines that only appear when the image polarity is correct
+  test('title line Τοῦ ἐν ἀγίοις is detected and contains Πατρὸς', () => {
+    assert.ok(fullText.includes('Πατρὸς'.normalize('NFD')),
+      'Πατρὸς not found — title line likely missed due to polarity bug');
+  });
+
+  test('short line λόγος is detected', () => {
+    assert.ok(fullText.includes('λόγος'.normalize('NFD')),
+      'λόγος not found — short title lines likely missed');
+  });
+
+  test('short line τήν. is detected', () => {
+    assert.ok(fullText.includes('τήν'.normalize('NFD')),
+      'τήν. not found — isolated short lines likely missed');
+  });
+
+  // Stable body-text substrings present across all correct runs
+  test('body text contains κηρύγματος', () => {
+    assert.ok(fullText.includes('κηρύγματος'.normalize('NFD')),
+      'κηρύγματος not found in output');
+  });
+
+  test('body text contains εὐρύχωρον', () => {
+    assert.ok(fullText.includes('εὐρύχωρον'.normalize('NFD')),
+      'εὐρύχωρον not found in output');
+  });
+});
