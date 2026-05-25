@@ -2,10 +2,31 @@
 const { test, describe, before } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
 const { KrakenSegmenter } = require('../src/segmenter');
 
-const MODEL   = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
+const MODEL    = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
 const FULLPAGE = path.join(__dirname, 'fixtures/fullpage.png');
+const ALTO_XML = path.join(__dirname, 'fixtures/rscir_0035-2217_1984_num_58_1_2999.pdf_page_7.xml');
+
+/** Parse ALTO baselines into [{cx, cy, content}] sorted by cy. */
+function parseAlto(xmlPath) {
+  const xml = fs.readFileSync(xmlPath, 'utf8');
+  const lines = [];
+  for (const m of xml.matchAll(/<TextLine[^>]+BASELINE="([^"]+)"[\s\S]*?CONTENT="([^"]*)"/g)) {
+    const pts   = m[1].trim().split(/\s+/).map(Number);
+    const xs    = pts.filter((_, i) => i % 2 === 0);
+    const ys    = pts.filter((_, i) => i % 2 === 1);
+    const xSpan = Math.max(...xs) - Math.min(...xs);
+    lines.push({
+      cx: xs.reduce((a, b) => a + b, 0) / xs.length,
+      cy: ys.reduce((a, b) => a + b, 0) / ys.length,
+      xSpan,
+      content: m[2],
+    });
+  }
+  return lines.sort((a, b) => a.cy - b.cy);
+}
 
 let segmenter;
 let result;
@@ -142,5 +163,66 @@ describe('segment reading order', () => {
         `line ${i} cy=${result.lines[i].obb.cy} < previous cy=${result.lines[i - 1].obb.cy}`
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// segment — ALTO ground-truth comparison
+//
+// The ALTO file is the reference segmentation produced by Python Kraken.
+// Each ALTO line should be matched by at least one pipeline detection within
+// CY_TOL pixels, and the matched detection's cx should be within CX_TOL pixels.
+// Short/margin lines (width < 200px in ALTO) are excluded from the cx check.
+// ---------------------------------------------------------------------------
+
+const CY_TOL = 40;   // px — vertical tolerance for baseline matching
+const CX_TOL = 200;  // px — horizontal centre tolerance
+
+describe('segment ALTO ground-truth comparison', () => {
+  let altoLines;
+
+  before(() => { altoLines = parseAlto(ALTO_XML); });
+
+  test('ALTO has expected number of lines (39)', () => {
+    assert.equal(altoLines.length, 39);
+  });
+
+  test('every ALTO line is matched by a detection within ' + CY_TOL + 'px vertically', () => {
+    const detectedCys = result.lines.map(l => l.obb.cy);
+    const missed = altoLines.filter(al =>
+      !detectedCys.some(cy => Math.abs(cy - al.cy) <= CY_TOL)
+    );
+    assert.equal(missed.length, 0,
+      'Unmatched ALTO lines:\n' + missed.map(l => `  cy=${Math.round(l.cy)} "${l.content}"`).join('\n')
+    );
+  });
+
+  test('no spurious detections (every detected line matches an ALTO line within ' + CY_TOL + 'px)', () => {
+    const altoCys = altoLines.map(l => l.cy);
+    const spurious = result.lines.filter(pl =>
+      !altoCys.some(cy => Math.abs(cy - pl.obb.cy) <= CY_TOL)
+    );
+    assert.equal(spurious.length, 0,
+      'Spurious detections:\n' + spurious.map(l => `  cy=${Math.round(l.obb.cy)}`).join('\n')
+    );
+  });
+
+  test('matched wide lines have cx within ' + CX_TOL + 'px of ALTO baseline centre', () => {
+    // Only check lines whose baseline spans > 200px (skips margin numbers, short titles etc.)
+    // Match each wide ALTO line against the closest wide detection to avoid pairing
+    // body text with nearby narrow margin-number detections at the same cy.
+    const wideAltoLines = altoLines.filter(al => al.xSpan > 200);
+    const failures = [];
+    for (const al of wideAltoLines) {
+      const match = result.lines
+        .filter(pl => Math.abs(pl.obb.cy - al.cy) <= CY_TOL && pl.obb.w > 200)
+        .sort((a, b) => Math.abs(a.obb.cy - al.cy) - Math.abs(b.obb.cy - al.cy))[0];
+      if (!match) continue;
+      const diff = Math.abs(match.obb.cx - al.cx);
+      if (diff > CX_TOL) {
+        failures.push(`cy=${Math.round(al.cy)} cx_alto=${Math.round(al.cx)} cx_det=${Math.round(match.obb.cx)} Δ=${Math.round(diff)} "${al.content.slice(0, 40)}"`);
+      }
+    }
+    assert.equal(failures.length, 0, 'cx mismatch:\n' + failures.map(s => '  ' + s).join('\n'));
   });
 });
