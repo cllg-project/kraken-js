@@ -123,28 +123,10 @@ function toChw(tensor, channels) {
  * @returns {Promise<{data: Float32Array, width: number, height: number, actualChannels: number}>}
  */
 async function preprocessPageImage(image, meta) {
-  const { height } = meta;
-  const oneChannelMode = meta.one_channel_mode;
-
-  if (oneChannelMode === '1') {
-    // Binarize: grayscale → Otsu threshold, then broadcast to 3-channel HWC float
-    const { data: buf, info } = await sharp(image, { failOn: 'none' })
-      .grayscale().threshold()
-      .resize({ height, fit: 'outside', kernel: 'lanczos3' })
-      .raw().toBuffer({ resolveWithObject: true });
-    const nPix = info.width * info.height;
-    const floatData = new Float32Array(nPix * 3);
-    for (let i = 0; i < nPix; i++) {
-      const v = buf[i] / 255.0;
-      floatData[i * 3]     = v;
-      floatData[i * 3 + 1] = v;
-      floatData[i * 3 + 2] = v;
-    }
-    return { data: floatData, width: info.width, height: info.height, actualChannels: 3 };
-  }
+  const { height, channels } = meta;
 
   let pipeline = sharp(image, { failOn: 'none' });
-  if (meta.channels === 1) {
+  if (channels === 1) {
     pipeline = pipeline.grayscale();
   } else {
     pipeline = pipeline.toColorspace('srgb').removeAlpha();
