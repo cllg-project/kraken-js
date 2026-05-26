@@ -277,7 +277,7 @@
 
       <label style="font-size:0.8rem;color:#7a6a50;display:flex;align-items:center;gap:0.4rem;user-select:none;">
         <input type="checkbox" id="no-column-split" />
-        Disable double-page column detection
+        Disable multi-column detection
       </label>
 
       <label style="font-size:0.8rem;color:#7a6a50;display:flex;align-items:center;gap:0.4rem;user-select:none;margin-top:0.4rem;">
@@ -322,7 +322,7 @@
   </footer>
 
   <script type="module">
-    import { runPipeline } from './demo.js';
+    import { runPipeline } from './demo.bundle.js';
 
     // demo.js and ort are now ready — dismiss the loading screen
     document.getElementById('page-loader').classList.add('hidden');

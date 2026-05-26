@@ -62,6 +62,14 @@ jobs:
           python3 export_kraken_onnx.py catmus-print-fondue-large.mlmodel \
             docs/models/catmus-print-fondue-large.js_mlmodel
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build demo bundle
+        run: npm install && npm run build:demo
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 

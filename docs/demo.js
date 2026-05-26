@@ -6,14 +6,20 @@
  *   - JSZip (global, loaded via script tag) for .js_mlmodel unpacking
  *   - Canvas API for image preprocessing (replaces sharp)
  *
- * The segmentation + recognition logic mirrors src/segmenter.js,
- * src/recognizer.js, src/preprocess.js, src/heatmap.js and src/decode.js.
+ * Pure heatmap and decode logic is imported directly from src/ at build time
+ * (esbuild bundles them in — see npm run build:demo).
  */
 
+import {
+  maxChannels, threshold, connectedComponents,
+  extractOrientedBBoxes, scaleOBBs, sortByReadingOrder,
+  findColumnGapFromProfile, splitComponentsAtX,
+} from '../src/heatmap.js';
+
+import { buildL2C, greedyCTC, decodeCodec } from '../src/decode.js';
+
 // ort is loaded as a UMD global via <script> tag in index.html.
-// Set wasmPaths so the runtime can fetch its .wasm workers from the same CDN.
 /* global ort */
-// Point to the same CDN so the .wasm worker files are fetched from there
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
 
 // ---------------------------------------------------------------------------
@@ -174,229 +180,6 @@ function preprocessLineCanvas(imgEl, meta) {
 }
 
 // ---------------------------------------------------------------------------
-// Heatmap post-processing (mirrors src/heatmap.js — pure functions)
-// ---------------------------------------------------------------------------
-
-function maxChannels(data, C, H, W, channelIndices) {
-  const out = new Float32Array(H * W).fill(-Infinity);
-  for (const c of channelIndices) {
-    const base = c * H * W;
-    for (let i = 0; i < H * W; i++) {
-      if (data[base + i] > out[i]) out[i] = data[base + i];
-    }
-  }
-  return out;
-}
-
-function threshold(channel, thresh) {
-  const mask = new Uint8Array(channel.length);
-  for (let i = 0; i < channel.length; i++) mask[i] = channel[i] >= thresh ? 1 : 0;
-  return mask;
-}
-
-function connectedComponents(mask, H, W) {
-  const labels = new Int32Array(H * W);
-  let count = 0;
-  const queue = [];
-  for (let startIdx = 0; startIdx < H * W; startIdx++) {
-    if (!mask[startIdx] || labels[startIdx]) continue;
-    count++;
-    labels[startIdx] = count;
-    queue.length = 0;
-    queue.push(startIdx);
-    let qi = 0;
-    while (qi < queue.length) {
-      const idx = queue[qi++];
-      const r = (idx / W) | 0, c = idx % W;
-      if (r > 0)     { const n = idx - W; if (mask[n] && !labels[n]) { labels[n] = count; queue.push(n); } }
-      if (r < H - 1) { const n = idx + W; if (mask[n] && !labels[n]) { labels[n] = count; queue.push(n); } }
-      if (c > 0)     { const n = idx - 1; if (mask[n] && !labels[n]) { labels[n] = count; queue.push(n); } }
-      if (c < W - 1) { const n = idx + 1; if (mask[n] && !labels[n]) { labels[n] = count; queue.push(n); } }
-    }
-  }
-  return { labels, count };
-}
-
-function eig2x2(a, b, d) {
-  const tr = a + d, det = a * d - b * b;
-  const disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
-  const l0 = tr / 2 + disc, l1 = tr / 2 - disc;
-  function eigvec(lambda) {
-    if (Math.abs(b) > 1e-12) {
-      const vx = b, vy = lambda - a, norm = Math.sqrt(vx * vx + vy * vy);
-      return [vx / norm, vy / norm];
-    }
-    return lambda >= a ? [1, 0] : [0, 1];
-  }
-  return { val: [l0, l1], vec: [eigvec(l0), eigvec(l1)] };
-}
-
-function computeOBB(xs, ys) {
-  const n = xs.length;
-  let cx = 0, cy = 0;
-  for (let i = 0; i < n; i++) { cx += xs[i]; cy += ys[i]; }
-  cx /= n; cy /= n;
-
-  let cxx = 0, cxy = 0, cyy = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = xs[i] - cx, dy = ys[i] - cy;
-    cxx += dx * dx; cxy += dx * dy; cyy += dy * dy;
-  }
-  cxx /= n; cxy /= n; cyy /= n;
-
-  const { vec } = eig2x2(cxx, cxy, cyy);
-  const [ux, uy] = vec[0], [vx, vy] = vec[1];
-
-  let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const dx = xs[i] - cx, dy = ys[i] - cy;
-    const u = dx * ux + dy * uy, v = dx * vx + dy * vy;
-    if (u < uMin) uMin = u; if (u > uMax) uMax = u;
-    if (v < vMin) vMin = v; if (v > vMax) vMax = v;
-  }
-
-  const w = uMax - uMin, h = vMax - vMin;
-  const uMid = (uMin + uMax) / 2, vMid = (vMin + vMax) / 2;
-  const ocx = cx + uMid * ux + vMid * vx;
-  const ocy = cy + uMid * uy + vMid * vy;
-
-  const corners = [[uMin, vMin], [uMax, vMin], [uMax, vMax], [uMin, vMax]]
-    .map(([u, v]) => [ocx + (u - uMid) * ux + (v - vMid) * vx,
-                      ocy + (u - uMid) * uy + (v - vMid) * vy]);
-
-  let angle = Math.atan2(uy, ux);
-  if (angle > Math.PI / 2)   angle -= Math.PI;
-  if (angle <= -Math.PI / 2) angle += Math.PI;
-
-  corners.sort((a, b) => (a[0] + a[1]) - (b[0] + b[1]));
-  const [tl] = corners.splice(0, 1);
-  corners.sort((a, b) => Math.atan2(a[1] - ocy, a[0] - ocx) - Math.atan2(b[1] - ocy, b[0] - ocx));
-  const sorted = [tl, ...corners];
-
-  return { cx: ocx, cy: ocy, w, h, angle, corners: sorted };
-}
-
-function extractOrientedBBoxes(labels, count, H, W, minArea = 20) {
-  const xs = Array.from({ length: count + 1 }, () => []);
-  const ys = Array.from({ length: count + 1 }, () => []);
-  for (let idx = 0; idx < H * W; idx++) {
-    const lbl = labels[idx];
-    if (lbl === 0) continue;
-    xs[lbl].push(idx % W);
-    ys[lbl].push((idx / W) | 0);
-  }
-  const results = [];
-  for (let lbl = 1; lbl <= count; lbl++) {
-    const area = xs[lbl].length;
-    if (area < minArea) continue;
-    results.push({ ...computeOBB(xs[lbl], ys[lbl]), label: lbl, area });
-  }
-  return results;
-}
-
-function findColumnSplit(obbs, imageWidth, imageHeight) {
-  if (obbs.length < 4) return null;
-  if (imageHeight && imageWidth / imageHeight < 1.2) return null;
-  const lo = imageWidth * 0.3, hi = imageWidth * 0.7;
-  const cxs = obbs.map(o => o.cx).sort((a, b) => a - b);
-  let maxGap = 0, splitX = null;
-  for (let i = 1; i < cxs.length; i++) {
-    const mid = (cxs[i] + cxs[i - 1]) / 2;
-    if (mid < lo || mid > hi) continue;
-    const gap = cxs[i] - cxs[i - 1];
-    if (gap > maxGap) { maxGap = gap; splitX = mid; }
-  }
-  return (splitX !== null && maxGap > imageWidth * 0.05) ? splitX : null;
-}
-
-function sortByReadingOrder(obbs, imageWidth, imageHeight, noColumnSplit) {
-  if (!noColumnSplit && imageWidth) {
-    const split = findColumnSplit(obbs, imageWidth, imageHeight);
-    if (split !== null) {
-      const left  = obbs.filter(o => o.cx <= split).sort((a, b) => a.cy - b.cy);
-      const right = obbs.filter(o => o.cx >  split).sort((a, b) => a.cy - b.cy);
-      return [...left, ...right];
-    }
-  }
-  return [...obbs].sort((a, b) => a.cy !== b.cy ? a.cy - b.cy : a.cx - b.cx);
-}
-
-function scaleOBBs(obbs, scaleX, scaleY, imageW, imageH) {
-  return obbs.map(obb => ({
-    ...obb,
-    cx: obb.cx * scaleX,
-    cy: obb.cy * scaleY,
-    w:  obb.w  * scaleX,
-    h:  obb.h  * scaleY,
-    corners: obb.corners.map(([x, y]) => [
-      Math.max(0, Math.min(imageW - 1, Math.round(x * scaleX))),
-      Math.max(0, Math.min(imageH - 1, Math.round(y * scaleY))),
-    ]),
-  }));
-}
-
-// ---------------------------------------------------------------------------
-// CTC decode (mirrors src/decode.js — pure functions)
-// ---------------------------------------------------------------------------
-
-function buildL2C(codec) {
-  const l2c = new Map();
-  for (const [char, ids] of Object.entries(codec)) l2c.set(ids.join(','), char);
-  return l2c;
-}
-
-function greedyCTC(logits, C, W) {
-  const probs = new Float32Array(logits.length);
-  for (let t = 0; t < W; t++) {
-    let maxVal = -Infinity;
-    for (let c = 0; c < C; c++) maxVal = Math.max(maxVal, logits[c * W + t]);
-    let sum = 0;
-    for (let c = 0; c < C; c++) {
-      const v = Math.exp(logits[c * W + t] - maxVal);
-      probs[c * W + t] = v; sum += v;
-    }
-    for (let c = 0; c < C; c++) probs[c * W + t] /= sum;
-  }
-  const results = [];
-  let prevLabel = 0, runStart = 0, runMaxConf = 0;
-  for (let t = 0; t < W; t++) {
-    let maxVal = -Infinity, maxIdx = 0;
-    for (let c = 0; c < C; c++) {
-      const v = probs[c * W + t];
-      if (v > maxVal) { maxVal = v; maxIdx = c; }
-    }
-    if (maxIdx !== prevLabel) {
-      if (prevLabel !== 0) results.push({ label: prevLabel, t0: runStart, t1: t - 1, conf: runMaxConf });
-      runStart = t; runMaxConf = maxVal;
-    } else {
-      if (maxVal > runMaxConf) runMaxConf = maxVal;
-    }
-    prevLabel = maxIdx;
-  }
-  if (prevLabel !== 0) results.push({ label: prevLabel, t0: runStart, t1: W - 1, conf: runMaxConf });
-  return results;
-}
-
-function decodeCodec(ctcLabels, l2c) {
-  const chars = [];
-  let i = 0;
-  while (i < ctcLabels.length) {
-    let matched = false;
-    for (let len = Math.min(4, ctcLabels.length - i); len >= 1; len--) {
-      const key = ctcLabels.slice(i, i + len).map(x => x.label).join(',');
-      if (l2c.has(key)) {
-        const group = ctcLabels.slice(i, i + len);
-        const conf  = group.reduce((s, x) => s + x.conf, 0) / group.length;
-        chars.push({ char: l2c.get(key), t0: group[0].t0, t1: group[len - 1].t1, conf });
-        i += len; matched = true; break;
-      }
-    }
-    if (!matched) i++;
-  }
-  return chars;
-}
-
-// ---------------------------------------------------------------------------
 // BrowserSegmenter
 // ---------------------------------------------------------------------------
 
@@ -405,6 +188,7 @@ class BrowserSegmenter {
     this._session       = session;
     this._meta          = meta;
     this._noColumnSplit = opts.noColumnSplit || false;
+    this._valleyRatio   = opts.valleyRatio   ?? 0.7;
   }
 
   static async create(url, opts = {}) {
@@ -432,21 +216,27 @@ class BrowserSegmenter {
     const merged  = maxChannels(outData, C, Hout, Wout, baselineIndices);
     const mask    = threshold(merged, 0.5);
     const { labels, count } = connectedComponents(mask, Hout, Wout);
-    let obbs = extractOrientedBBoxes(labels, count, Hout, Wout, 20);
+
+    const colGapX = findColumnGapFromProfile(outData, Hout, Wout, baselineIndices, this._valleyRatio);
+    const finalCount = colGapX !== null
+      ? splitComponentsAtX(labels, count, Hout, Wout, colGapX)
+      : count;
+
+    let obbs = extractOrientedBBoxes(labels, finalCount, Hout, Wout, 20);
 
     const scaleX = origW / Wout;
     const scaleY = origH / Hout;
     obbs = scaleOBBs(obbs, scaleX, scaleY, origW, origH);
 
-    // Determine type per OBB by which class_mapping.baselines value has highest mean
-    const classMap = this._meta.class_mapping.baselines;
-    const classEntries = Object.entries(classMap); // [[name, idx], ...]
+    const imgSplitX = colGapX !== null ? Math.round(colGapX * scaleX) : undefined;
 
-    const lines = sortByReadingOrder(obbs, origW, origH, this._noColumnSplit)
+    // Determine type per OBB
+    const classMap     = this._meta.class_mapping.baselines;
+    const classEntries = Object.entries(classMap);
+
+    const lines = sortByReadingOrder(obbs, origW, origH, this._noColumnSplit, imgSplitX)
       .map(obb => {
-        // find dominant baseline class for this component
         let bestType = classEntries[0][0];
-        // simple heuristic: lowest class index if only one channel, else DefaultLine
         if (classEntries.length > 1) {
           const dominantIdx = baselineIndices[0];
           bestType = classEntries.find(([, idx]) => idx === dominantIdx)?.[0] ?? classEntries[0][0];

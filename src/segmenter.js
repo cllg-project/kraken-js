@@ -5,6 +5,7 @@ const { preprocessPageImage, toChw } = require('./preprocess');
 const {
   maxChannels, threshold, connectedComponents,
   extractOrientedBBoxes, scaleOBBs, sortByReadingOrder,
+  findColumnGapFromProfile, splitComponentsAtX,
 } = require('./heatmap');
 
 /**
@@ -29,6 +30,7 @@ class KrakenSegmenter {
    * @param {number}   [opts.threshold=0.5]       Sigmoid threshold for baseline heatmap binarisation
    * @param {number}   [opts.minArea=20]           Minimum connected-component area (heatmap pixels)
    * @param {boolean}  [opts.noColumnSplit=false]  Disable double-page column detection
+   * @param {number}   [opts.valleyRatio=0.2]      Column-gap sensitivity: trough must be < median × this
    * @param {string[]} [opts.executionProviders=['cpu']]  ONNX Runtime execution providers
    * @returns {Promise<KrakenSegmenter>}
    */
@@ -92,10 +94,17 @@ class KrakenSegmenter {
     const thresh = this._opts.threshold ?? 0.5;
     const mask = threshold(baseline, H_out, W_out, thresh);
     const { labels, count } = connectedComponents(mask, H_out, W_out);
-    const rawObbs = extractOrientedBBoxes(labels, count, H_out, W_out, this._opts.minArea ?? 20);
+
+    const colGapX = findColumnGapFromProfile(output, H_out, W_out, baselineChannels,
+      { valleyRatio: this._opts.valleyRatio });
+    const finalCount = colGapX !== null
+      ? splitComponentsAtX(labels, count, H_out, W_out, colGapX)
+      : count;
+
+    const rawObbs = extractOrientedBBoxes(labels, finalCount, H_out, W_out, this._opts.minArea ?? 20);
 
     // One-pass accumulation of per-component, per-channel activation sums
-    const compSums = Array.from({ length: count + 1 }, () => ({}));
+    const compSums = Array.from({ length: finalCount + 1 }, () => ({}));
     for (let idx = 0; idx < H_out * W_out; idx++) {
       const lbl = labels[idx];
       if (lbl === 0) continue;
@@ -118,8 +127,9 @@ class KrakenSegmenter {
       return { obb, type: channelToClass[bestChannel] || 'DefaultLine' };
     });
 
+    const imgSplitX = colGapX !== null ? Math.round(colGapX * scaleX) : undefined;
     const tagged   = lines.map((l, i) => ({ ...l.obb, _i: i }));
-    const ordered  = sortByReadingOrder(tagged, origW, origH, this._opts.noColumnSplit);
+    const ordered  = sortByReadingOrder(tagged, origW, origH, this._opts.noColumnSplit, imgSplitX);
     const sortedLines = ordered.map(o => lines[o._i]);
     lines.length = 0;
     lines.push(...sortedLines);

@@ -6,11 +6,15 @@
   "type": "commonjs",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "test:smoke": "node test.js"
+    "test:smoke": "node test.js",
+    "build:demo": "esbuild docs/demo.js --bundle --format=esm --outfile=docs/demo.bundle.js"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",
     "onnxruntime-node": "^1.21.0",
     "sharp": "^0.34.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }

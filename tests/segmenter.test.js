@@ -5,9 +5,10 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { KrakenSegmenter } = require('../src/segmenter');
 
-const MODEL    = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
-const FULLPAGE = path.join(__dirname, 'fixtures/fullpage.png');
-const ALTO_XML = path.join(__dirname, 'fixtures/rscir_0035-2217_1984_num_58_1_2999.pdf_page_7.xml');
+const MODEL      = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
+const FULLPAGE   = path.join(__dirname, 'fixtures/fullpage.png');
+const TWO_COLS   = path.join(__dirname, 'fixtures/two_columns_close.jpg');
+const ALTO_XML   = path.join(__dirname, 'fixtures/rscir_0035-2217_1984_num_58_1_2999.pdf_page_7.xml');
 
 /** Parse ALTO baselines into [{cx, cy, content}] sorted by cy. */
 function parseAlto(xmlPath) {
@@ -224,5 +225,37 @@ describe('segment ALTO ground-truth comparison', () => {
       }
     }
     assert.equal(failures.length, 0, 'cx mismatch:\n' + failures.map(s => '  ' + s).join('\n'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// segment — two-column portrait page
+//
+// two_columns_close.jpg is a portrait (1760×2716) two-column page where the
+// model would previously merge baselines from both columns into single wide
+// components. The baseline activation column profile should detect and split
+// the inter-column gap, producing narrow per-column OBBs.
+// ---------------------------------------------------------------------------
+
+describe('two-column portrait page', () => {
+  let twoColResult;
+
+  before(async () => {
+    twoColResult = await segmenter.segment(TWO_COLS);
+  });
+
+  test('detects a plausible number of lines (10–80)', () => {
+    assert.ok(twoColResult.lines.length >= 10,
+      `too few lines: ${twoColResult.lines.length}`);
+    assert.ok(twoColResult.lines.length <= 80,
+      `too many lines: ${twoColResult.lines.length}`);
+  });
+
+  test('no line spans more than 65 % of image width (columns not merged)', () => {
+    const maxW = twoColResult.imageSize.width * 0.65;
+    for (const { obb } of twoColResult.lines) {
+      assert.ok(obb.w <= maxW,
+        `merged line detected: obb.w=${Math.round(obb.w)} > ${Math.round(maxW)}`);
+    }
   });
 });

@@ -200,6 +200,94 @@ function extractOrientedBBoxes(labels, count, H, W, minArea = 20) {
 }
 
 /**
+ * Detect a vertical column gap from the raw baseline activation profile.
+ *
+ * For each x-column sums sigmoid(logit) across all rows and all baseline
+ * channels. Finds the deepest trough in the central 40 % of the heatmap
+ * width. Returns that x if the trough is below `valleyRatio` × the median
+ * column sum, otherwise null.
+ *
+ * Using raw activations (before thresholding) gives a cleaner signal than
+ * post-hoc analysis of binarised components: the model itself assigns near-
+ * zero probability to the inter-column space regardless of whether adjacent
+ * baselines happen to be connected after binarisation.
+ *
+ * @param {Float32Array} output           Raw model output (C × H × W)
+ * @param {number}       H                Heatmap height
+ * @param {number}       W                Heatmap width
+ * @param {number[]}     baselineChannels  Channel indices for ALL baseline classes
+ * @param {object}       [opts]
+ * @param {number}       [opts.valleyRatio=0.2]  Trough must be < median × this
+ * @returns {number|null}  Heatmap x of the column gap, or null
+ */
+function findColumnGapFromProfile(output, H, W, baselineChannels, opts = {}) {
+  const valleyRatio = opts.valleyRatio ?? 0.7;
+
+  // Sum baseline channel probabilities across all rows for each x-column.
+  // Model outputs are already in [0, 1] — do NOT apply sigmoid again.
+  const profile = new Float64Array(W);
+  for (const c of baselineChannels) {
+    const base = c * H * W;
+    for (let y = 0; y < H; y++) {
+      const row = base + y * W;
+      for (let x = 0; x < W; x++) {
+        profile[x] += output[row + x];
+      }
+    }
+  }
+
+  const sorted = Float64Array.from(profile).sort();
+  const median = sorted[Math.floor(W / 2)];
+  if (median === 0) return null;
+
+  const lo = Math.round(W * 0.3);
+  const hi = Math.round(W * 0.7);
+  let minVal = Infinity, splitX = -1;
+  for (let x = lo; x <= hi; x++) {
+    if (profile[x] < minVal) { minVal = profile[x]; splitX = x; }
+  }
+
+  return (splitX >= 0 && minVal < median * valleyRatio) ? splitX : null;
+}
+
+/**
+ * Split connected components that straddle a vertical column boundary.
+ *
+ * For each component that has pixels on both sides of splitX, re-labels the
+ * right-side pixels as a new component. The split coordinate should come from
+ * `findColumnGapFromProfile` so it reflects the model's own column-gap signal.
+ *
+ * @param {Int32Array} labels   Component label map (H×W), modified in-place
+ * @param {number}     count    Current number of components
+ * @param {number}     H
+ * @param {number}     W
+ * @param {number}     splitX   Heatmap x coordinate of the column gap
+ * @returns {number} New component count (>= count)
+ */
+function splitComponentsAtX(labels, count, H, W, splitX) {
+  const hasLeft  = new Uint8Array(count + 1);
+  const hasRight = new Uint8Array(count + 1);
+  for (let idx = 0; idx < H * W; idx++) {
+    const lbl = labels[idx];
+    if (lbl === 0) continue;
+    if (idx % W <= splitX) hasLeft[lbl]  = 1;
+    else                   hasRight[lbl] = 1;
+  }
+
+  const remap = new Int32Array(count + 1);
+  let newCount = count;
+  for (let lbl = 1; lbl <= count; lbl++) {
+    if (hasLeft[lbl] && hasRight[lbl]) remap[lbl] = ++newCount;
+  }
+
+  for (let idx = 0; idx < H * W; idx++) {
+    const lbl = labels[idx];
+    if (lbl !== 0 && remap[lbl] && idx % W > splitX) labels[idx] = remap[lbl];
+  }
+  return newCount;
+}
+
+/**
  * Look for a vertical gutter between two page columns.
  *
  * Only activates on landscape images (width > height * 1.2), which is the
@@ -237,15 +325,19 @@ function findColumnSplit(obbs, imageWidth, imageHeight) {
  * by cy independently and concatenated (left first). Pass noColumnSplit:true to
  * disable this detection and always use a plain cy-then-cx sort.
  *
+ * For portrait two-column pages, pass `forceSplitX` (in image pixels) derived
+ * from `findColumnGapFromProfile` to bypass the landscape gate.
+ *
  * @param {Array<OBB>} obbs
- * @param {number} [imageWidth]
- * @param {number} [imageHeight]
+ * @param {number}  [imageWidth]
+ * @param {number}  [imageHeight]
  * @param {boolean} [noColumnSplit]
+ * @param {number}  [forceSplitX]   Pre-computed column split x in image pixels
  * @returns {Array<OBB>}
  */
-function sortByReadingOrder(obbs, imageWidth, imageHeight, noColumnSplit) {
-  if (!noColumnSplit && imageWidth) {
-    const split = findColumnSplit(obbs, imageWidth, imageHeight);
+function sortByReadingOrder(obbs, imageWidth, imageHeight, noColumnSplit, forceSplitX) {
+  if (!noColumnSplit) {
+    const split = forceSplitX ?? (imageWidth ? findColumnSplit(obbs, imageWidth, imageHeight) : null);
     if (split !== null) {
       const left  = obbs.filter(o => o.cx <= split).sort((a, b) => a.cy - b.cy);
       const right = obbs.filter(o => o.cx >  split).sort((a, b) => a.cy - b.cy);
@@ -284,6 +376,8 @@ module.exports = {
   extractOrientedBBoxes,
   sortByReadingOrder,
   scaleOBBs,
+  findColumnGapFromProfile,
+  splitComponentsAtX,
   // exported for testing
   computeOBB,
   eig2x2,
