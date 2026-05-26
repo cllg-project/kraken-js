@@ -397,10 +397,20 @@
       ctx.lineWidth   = lw;
       for (const { cropBounds } of overlayLines) {
         if (!cropBounds) continue;
-        const { left, top, right, bottom } = cropBounds;
-        const w = right - left, h = bottom - top;
-        ctx.fillRect(left, top, w, h);
-        ctx.strokeRect(left, top, w, h);
+        const pts = cropBounds.rotCorners;
+        if (pts && pts.length === 4) {
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0], pts[0][1]);
+          for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          // fallback: axis-aligned rect
+          const { left, top, right, bottom } = cropBounds;
+          ctx.fillRect(left, top, right - left, bottom - top);
+          ctx.strokeRect(left, top, right - left, bottom - top);
+        }
       }
     }
 
