@@ -552,6 +552,8 @@ function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topl
   c.width   = finalW;
   c.height  = finalH;
   const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, finalW, finalH);
 
@@ -605,7 +607,10 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
   const sourceCanvas = document.createElement('canvas');
   sourceCanvas.width  = imageSize.width;
   sourceCanvas.height = imageSize.height;
-  sourceCanvas.getContext('2d').drawImage(imgEl, 0, 0);
+  const srcCtx = sourceCanvas.getContext('2d');
+  srcCtx.imageSmoothingEnabled  = true;
+  srcCtx.imageSmoothingQuality  = 'high';
+  srcCtx.drawImage(imgEl, 0, 0);
 
   const lineHeight = estimateLineHeight(lines, imageSize);
   const topline    = segmenter._meta.topline || false;
