@@ -35,6 +35,14 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-kraken-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-kraken-
+
       - name: Cache exported CATMuS model
         id: cache-catmus
         uses: actions/cache@v4
@@ -44,7 +52,7 @@ jobs:
 
       - name: Install Kraken (for model export)
         if: steps.cache-catmus.outputs.cache-hit != 'true'
-        run: pip install kraken
+        run: pip install kraken onnx
 
       - name: Download and export CATMuS Latin print model
         if: steps.cache-catmus.outputs.cache-hit != 'true'
