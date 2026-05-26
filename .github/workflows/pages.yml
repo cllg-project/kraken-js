@@ -30,6 +30,30 @@ jobs:
           cp tests/fixtures/model_best.js_mlmodel   docs/models/
           cp tests/fixtures/fullpage.png             docs/models/
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache exported CATMuS model
+        id: cache-catmus
+        uses: actions/cache@v4
+        with:
+          path: docs/models/catmus-print-fondue-large.js_mlmodel
+          key: catmus-print-fondue-large-v1
+
+      - name: Install Kraken (for model export)
+        if: steps.cache-catmus.outputs.cache-hit != 'true'
+        run: pip install kraken
+
+      - name: Download and export CATMuS Latin print model
+        if: steps.cache-catmus.outputs.cache-hit != 'true'
+        run: |
+          curl -L "https://zenodo.org/records/10592716/files/catmus-print-fondue-large.mlmodel?download=1" \
+            -o catmus-print-fondue-large.mlmodel
+          python3 export_kraken_onnx.py catmus-print-fondue-large.mlmodel \
+            docs/models/catmus-print-fondue-large.js_mlmodel
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 

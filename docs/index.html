@@ -255,9 +255,7 @@
     <p>OCR/HTR in the browser — segmentation + recognition</p>
   </header>
 
-  <div id="greek-notice" style="background:#7a4a20;color:#f5f0e8;padding:0.6rem 2rem;font-size:0.85rem;">
-    ⚠ The bundled models are trained on Ancient Greek polytonic print. Results on other scripts or languages will be meaningless.
-  </div>
+  <div id="model-notice" style="background:#7a4a20;color:#f5f0e8;padding:0.6rem 2rem;font-size:0.85rem;"></div>
 
   <main>
     <section id="image-panel">
@@ -282,6 +280,14 @@
         Disable double-page column detection
       </label>
 
+      <label style="font-size:0.8rem;color:#7a6a50;display:flex;align-items:center;gap:0.4rem;user-select:none;margin-top:0.4rem;">
+        Recognition model:
+        <select id="model-select" style="font-size:0.8rem;padding:0.2rem 0.4rem;border-radius:4px;border:1px solid #c8b89a;background:#faf6f0;color:#3a2a1a;cursor:pointer;">
+          <option value="greek">Greek print (Antiqua Graeca)</option>
+          <option value="latin">Latin script print (CATMuS)</option>
+        </select>
+      </label>
+
       <div id="status">Models not loaded.</div>
     </section>
 
@@ -302,8 +308,7 @@
     <a href="https://onnxruntime.ai" target="_blank" rel="noopener">ONNX Runtime Web</a>.<br /><br />
 
     <strong>Known limitations:</strong>
-    The bundled models are trained on Ancient Greek polytonic print; results on other scripts
-    will be meaningless.
+    Each model is script-specific; results on other scripts will be meaningless.
     Line detection uses oriented bounding rectangles (OBBs) derived from PCA — curved or wavy
     baselines are approximated as a straight rectangle, which may degrade accuracy on highly
     curved text. Region masking (excluding margins or illustrations from segmentation) is not
@@ -323,8 +328,28 @@
     document.getElementById('page-loader').classList.add('hidden');
 
     const SEG_URL = './models/segmentation.js_mlmodel';
-    const REC_URL = './models/model_best.js_mlmodel';
-    const SAMPLE_URL = './models/fullpage.png';
+
+    const MODELS = {
+      greek: {
+        recUrl:  './models/model_best.js_mlmodel',
+        notice:  '⚠ The Greek print model is trained on Ancient Greek polytonic print. Results on other scripts will be meaningless.',
+        sampleUrl: './models/fullpage.png',
+      },
+      latin: {
+        recUrl:  './models/catmus-print-fondue-large.js_mlmodel',
+        notice:  '⚠ The CATMuS model is trained on Latin script print. Results on other scripts will be meaningless.',
+        sampleUrl: null,
+      },
+    };
+
+    const modelSelect  = document.getElementById('model-select');
+    const noticeEl     = document.getElementById('model-notice');
+
+    function applyModelNotice() {
+      noticeEl.textContent = MODELS[modelSelect.value].notice;
+    }
+    applyModelNotice();
+    modelSelect.addEventListener('change', applyModelNotice);
 
     const canvas    = document.getElementById('page-canvas');
     const placeholder = document.getElementById('canvas-placeholder');
@@ -399,7 +424,9 @@
       btnSample.disabled = true;
       setStatus('Loading sample image…');
       try {
-        const img = await loadImageFromUrl(SAMPLE_URL);
+        const sampleUrl = MODELS[modelSelect.value].sampleUrl;
+        if (!sampleUrl) { setStatus('No sample image available for this model.', true); return; }
+        const img = await loadImageFromUrl(sampleUrl);
         renderImage(img);
         setStatus('Sample loaded. Press Run OCR.');
       } catch (e) {
@@ -472,7 +499,7 @@
 
       try {
         let lineCount = 0;
-        await runPipeline(currentImg, SEG_URL, REC_URL, {
+        await runPipeline(currentImg, SEG_URL, MODELS[modelSelect.value].recUrl, {
           noColumnSplit: noColumnSplitCb.checked,
           onStatus: msg => setStatus(msg),
           onLine: ({ obb, type, text, cropBounds }) => {
