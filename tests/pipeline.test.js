@@ -4,9 +4,10 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { KrakenPipeline } = require('../src/pipeline');
 
-const SEG_MODEL  = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
-const REC_MODEL  = path.join(__dirname, 'fixtures/model_best.js_mlmodel');
-const FULLPAGE   = path.join(__dirname, 'fixtures/fullpage.png');
+const SEG_MODEL   = path.join(__dirname, 'fixtures/segmentation.js_mlmodel');
+const REC_MODEL   = path.join(__dirname, 'fixtures/model_best.js_mlmodel');
+const FULLPAGE    = path.join(__dirname, 'fixtures/fullpage.png');
+const DOUBLE_PAGE = path.join(__dirname, 'fixtures/double_page.png');
 
 let pipeline;
 let results;
@@ -145,5 +146,57 @@ describe('process content regression', () => {
   test('body text contains εὐρύχωρον', () => {
     assert.ok(fullText.includes('εὐρύχωρον'.normalize('NFD')),
       'εὐρύχωρον not found in output');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// double-page spread — OBB crop + reading order
+//
+// double_page.png is a landscape two-column spread. Right-page lines are
+// angled at −1.4° to −1.8°, exercising the OBB-oriented crop path.
+// The column-split heuristic should place the left page first.
+// ---------------------------------------------------------------------------
+
+describe('double-page spread', () => {
+  let dpResults;
+
+  before(async () => {
+    dpResults = await pipeline.process(DOUBLE_PAGE);
+  });
+
+  test('detects a plausible number of lines (20–80)', () => {
+    assert.ok(dpResults.length >= 20, `too few lines: ${dpResults.length}`);
+    assert.ok(dpResults.length <= 80, `too many lines: ${dpResults.length}`);
+  });
+
+  // Reading order: left column must precede right column.
+  // "κεκλήκασι" appears on the left page; "τετταράκοντα" on the right.
+  test('left-page text precedes right-page text (column reading order)', () => {
+    const texts = dpResults.map(r => r.text.normalize('NFD'));
+    const leftIdx  = texts.findIndex(t => t.includes('κεκλήκασι'.normalize('NFD')));
+    const rightIdx = texts.findIndex(t => t.includes('τετταράκοντα'.normalize('NFD')));
+    assert.ok(leftIdx  !== -1, '"κεκλήκασι" (left page) not found');
+    assert.ok(rightIdx !== -1, '"τετταράκοντα" (right page) not found');
+    assert.ok(leftIdx < rightIdx,
+      `left-page line (${leftIdx}) should come before right-page line (${rightIdx})`);
+  });
+
+  // Right-page body text — these lines are angled and test OBB-oriented cropping.
+  test('right-page body contains τετταράκοντα (angled OBB crop)', () => {
+    const fullText = dpResults.map(r => r.text).join('\n').normalize('NFD');
+    assert.ok(fullText.includes('τετταράκοντα'.normalize('NFD')),
+      'τετταράκοντα not found — right-page angled crop likely failing');
+  });
+
+  test('right-page body contains ἐλάμβανον (angled OBB crop)', () => {
+    const fullText = dpResults.map(r => r.text).join('\n').normalize('NFD');
+    assert.ok(fullText.includes('ἐλάμβανον'.normalize('NFD')),
+      'ἐλάμβανον not found — right-page angled crop likely failing');
+  });
+
+  test('right-page body contains κλινοποιοὺς (angled OBB crop)', () => {
+    const fullText = dpResults.map(r => r.text).join('\n').normalize('NFD');
+    assert.ok(fullText.includes('κλινοποιοὺς'.normalize('NFD')),
+      'κλινοποιοὺς not found — right-page angled crop likely failing');
   });
 });

@@ -174,6 +174,21 @@ Each result:
 
 The pipeline resizes each line crop to the recognizer's expected height, so the `chars` `x0`/`x1` coordinates are relative to the **crop**, not the full page.
 
+Pipeline options (passed as the third argument to `KrakenPipeline.create`):
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `expandUp` | `0.85` | Fraction of estimated line height to include above the baseline |
+| `expandDown` | `0.35` | Fraction of estimated line height to include below the baseline |
+| `segmenter` | `{}` | Options forwarded to `KrakenSegmenter.create` |
+| `recognizer` | `{}` | Options forwarded to `KrakenRecognizer.create` |
+
+```js
+const pipeline = await KrakenPipeline.create(segPath, recPath, {
+  expandDown: 0.5,  // more room for descenders
+});
+```
+
 ### Hardware acceleration
 
 ```js

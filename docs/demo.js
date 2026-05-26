@@ -507,58 +507,65 @@ class BrowserRecognizer {
 
 function estimateLineHeight(lines, imageSize) {
   if (lines.length < 2) return Math.round(imageSize.height / 30);
-  const cys  = lines.map(l => l.obb.cy).slice().sort((a, b) => a - b);
+  const maxGap = imageSize.height * 0.3;
   const gaps = [];
-  for (let i = 1; i < cys.length; i++) {
-    const g = cys[i] - cys[i - 1];
-    if (g > 0) gaps.push(g);
+  for (let i = 1; i < lines.length; i++) {
+    const g = lines[i].obb.cy - lines[i - 1].obb.cy;
+    if (g > 2 && g < maxGap) gaps.push(g);
   }
   if (gaps.length === 0) return Math.round(imageSize.height / 30);
   gaps.sort((a, b) => a - b);
   return gaps[Math.floor(gaps.length / 2)];
 }
 
-function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topline) {
-  const { cy, angle, corners } = obb;
-  const expandUp   = topline ? lineHeight * 0.25 : lineHeight * 0.85;
-  const expandDown = topline ? lineHeight * 0.85 : lineHeight * 0.25;
-
-  const xs   = corners.map(c => c[0]);
+function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topline, opts = {}) {
+  const { cx, cy, angle, w: obbW } = obb;
+  const upRatio    = opts.expandUp   ?? (topline ? 0.35 : 0.85);
+  const downRatio  = opts.expandDown ?? (topline ? 0.85 : 0.35);
+  const expandUp   = lineHeight * upRatio;
+  const expandDown = lineHeight * downRatio;
   const hPad = Math.ceil(lineHeight * 0.1);
+  const hw   = obbW / 2 + hPad;
 
-  const left   = Math.max(0, Math.floor(Math.min(...xs)) - hPad);
-  const top    = Math.max(0, Math.floor(cy - expandUp));
-  const right  = Math.min(origW - 1, Math.ceil(Math.max(...xs)) + hPad);
-  const bottom = Math.min(origH - 1, Math.ceil(cy + expandDown));
+  const finalW = Math.max(1, Math.ceil(2 * hw));
+  const finalH = Math.max(1, Math.ceil(expandUp + expandDown));
 
-  const cropW = Math.max(1, right - left);
-  const cropH = Math.max(1, bottom - top);
-  // bounds exposed for overlay drawing
-  extractLineCropCanvas._lastBounds = { left, top, right, bottom };
+  // Compute the rotated crop corners for the overlay
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  const vx = sinA, vy = -cosA; // perpendicular "above baseline" direction
+  const rotCorners = [
+    [cx - hw * cosA + expandUp   * vx, cy - hw * sinA + expandUp   * vy],
+    [cx + hw * cosA + expandUp   * vx, cy + hw * sinA + expandUp   * vy],
+    [cx + hw * cosA - expandDown * vx, cy + hw * sinA - expandDown * vy],
+    [cx - hw * cosA - expandDown * vx, cy - hw * sinA - expandDown * vy],
+  ];
+  const rxs = rotCorners.map(c => c[0]), rys = rotCorners.map(c => c[1]);
+  extractLineCropCanvas._lastBounds = {
+    left:       Math.max(0, Math.floor(Math.min(...rxs))),
+    top:        Math.max(0, Math.floor(Math.min(...rys))),
+    right:      Math.min(origW - 1, Math.ceil(Math.max(...rxs))),
+    bottom:     Math.min(origH - 1, Math.ceil(Math.max(...rys))),
+    rotCorners,
+  };
 
   const c   = document.createElement('canvas');
+  c.width   = finalW;
+  c.height  = finalH;
   const ctx = c.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, finalW, finalH);
 
-  const angleDeg = angle * 180 / Math.PI;
-  if (Math.abs(angleDeg) >= 0.5) {
-    // Rotate the crop around its centre
-    const rad = -angleDeg * Math.PI / 180;
-    const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
-    const rotW = Math.ceil(cropW * cos + cropH * sin);
-    const rotH = Math.ceil(cropW * sin + cropH * cos);
-    c.width  = rotW;
-    c.height = rotH;
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, rotW, rotH);
-    ctx.save();
-    ctx.translate(rotW / 2, rotH / 2);
-    ctx.rotate(rad);
-    ctx.drawImage(sourceCanvas, left, top, cropW, cropH, -cropW / 2, -cropH / 2, cropW, cropH);
-    ctx.restore();
+  const { left, top, right, bottom } = extractLineCropCanvas._lastBounds;
+  if (Math.abs(angle * 180 / Math.PI) < 0.5) {
+    ctx.drawImage(sourceCanvas, left, top, right - left, bottom - top, 0, 0, finalW, finalH);
   } else {
-    c.width  = cropW;
-    c.height = cropH;
-    ctx.drawImage(sourceCanvas, left, top, cropW, cropH, 0, 0, cropW, cropH);
+    // Translate so (cx, cy) lands at the baseline anchor, rotate by -angle,
+    // draw the full source — the text line emerges horizontal.
+    ctx.save();
+    ctx.translate(finalW / 2, expandUp);
+    ctx.rotate(-angle);
+    ctx.drawImage(sourceCanvas, -cx, -cy);
+    ctx.restore();
   }
 
   return c;
@@ -577,7 +584,8 @@ function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topl
  * @param {{ onStatus?: (msg:string)=>void, onLine?: (line:object)=>void }} opts
  */
 export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
-  const { onStatus = () => {}, onLine = () => {}, noColumnSplit = false } = opts;
+  const { onStatus = () => {}, onLine = () => {}, noColumnSplit = false,
+          expandUp, expandDown } = opts;
 
   onStatus('Loading segmentation model…');
   const segmenter = await BrowserSegmenter.create(segUrl, { noColumnSplit });
@@ -613,7 +621,8 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
     const cropCanvas = extractLineCropCanvas(
       sourceCanvas, obb,
       imageSize.width, imageSize.height,
-      lineHeight, topline
+      lineHeight, topline,
+      { expandUp, expandDown }
     );
     const cropBounds = { ...extractLineCropCanvas._lastBounds };
 

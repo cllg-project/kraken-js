@@ -32,7 +32,7 @@ class KrakenPipeline {
 
     const crops = await Promise.all(
       lines.map(({ obb }) =>
-        extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline)
+        extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline, this._opts)
       )
     );
 
@@ -53,11 +53,16 @@ class KrakenPipeline {
  */
 function estimateLineHeight(lines, imageSize) {
   if (lines.length < 2) return Math.round(imageSize.height / 30);
-  const cys = lines.map(l => l.obb.cy).slice().sort((a, b) => a - b);
+  // Use lines in their existing order (columns already grouped by sortByReadingOrder).
+  // A global cy sort would interleave two columns, producing near-zero gaps between
+  // lines at the same vertical position on opposite pages — biasing the median to ~0.
+  // Filter: skip gaps < 2px (cross-column noise) and > 30% of image height (the jump
+  // from the bottom of one column back to the top of the next).
+  const maxGap = imageSize.height * 0.3;
   const gaps = [];
-  for (let i = 1; i < cys.length; i++) {
-    const g = cys[i] - cys[i - 1];
-    if (g > 0) gaps.push(g);
+  for (let i = 1; i < lines.length; i++) {
+    const g = lines[i].obb.cy - lines[i - 1].obb.cy;
+    if (g > 2 && g < maxGap) gaps.push(g);
   }
   if (gaps.length === 0) return Math.round(imageSize.height / 30);
   gaps.sort((a, b) => a - b);
@@ -67,35 +72,75 @@ function estimateLineHeight(lines, imageSize) {
 /**
  * Extract a deskewed line crop from a full-page image buffer.
  *
- * Uses estimated line height (not obb.h, which is just the baseline width) to
- * determine the vertical crop extent. For topline=false (Kraken default), text
- * sits above the baseline → expand mostly upward.
+ * Strategy: orient the crop along the OBB angle, then straighten it.
+ *   1. Compute the 4 corners of the desired crop in image space (OBB expanded
+ *      perpendicular to the baseline by expandUp/expandDown).
+ *   2. Extract the axis-aligned bounding box of those 4 corners.
+ *   3. Rotate the extracted patch by -angle so text becomes horizontal.
+ *   4. Re-extract the now-axis-aligned crop from the rotated patch.
  */
-async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topline) {
-  const { cx, cy, angle, corners } = obb;
+async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topline, opts = {}) {
+  const { cx, cy, angle, w: obbW } = obb;
 
-  const expandUp   = topline ? lineHeight * 0.25 : lineHeight * 0.85;
-  const expandDown = topline ? lineHeight * 0.85 : lineHeight * 0.25;
-
-  const xs  = corners.map(c => c[0]);
+  const upRatio    = opts.expandUp   ?? (topline ? 0.35 : 0.85);
+  const downRatio  = opts.expandDown ?? (topline ? 0.85 : 0.35);
+  const expandUp   = lineHeight * upRatio;
+  const expandDown = lineHeight * downRatio;
   const hPad = Math.ceil(lineHeight * 0.1);
-
-  const left   = Math.max(0, Math.floor(Math.min(...xs)) - hPad);
-  const top    = Math.max(0, Math.floor(cy - expandUp));
-  const right  = Math.min(origW - 1, Math.ceil(Math.max(...xs)) + hPad);
-  const bottom = Math.min(origH - 1, Math.ceil(cy + expandDown));
-
-  const cropW = Math.max(1, right - left);
-  const cropH = Math.max(1, bottom - top);
-
+  const hw   = obbW / 2 + hPad;
   const angleDeg = angle * 180 / Math.PI;
-  let pipeline = sharp(imageBuffer).extract({ left, top, width: cropW, height: cropH });
 
-  if (Math.abs(angleDeg) >= 0.5) {
-    pipeline = pipeline.rotate(-angleDeg, { background: { r: 255, g: 255, b: 255, alpha: 1 } });
+  // Unit vectors: along text direction and perpendicular "above baseline"
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  const vx = sinA, vy = -cosA; // 90° CCW from primary axis = "above" in screen coords
+
+  // 4 corners of the oriented crop region (TL, TR, BR, BL)
+  const rc = [
+    [cx - hw * cosA + expandUp   * vx, cy - hw * sinA + expandUp   * vy],
+    [cx + hw * cosA + expandUp   * vx, cy + hw * sinA + expandUp   * vy],
+    [cx + hw * cosA - expandDown * vx, cy + hw * sinA - expandDown * vy],
+    [cx - hw * cosA - expandDown * vx, cy - hw * sinA - expandDown * vy],
+  ];
+
+  // Axis-aligned bounding box of those corners → pre-extract region
+  const rxs = rc.map(c => c[0]), rys = rc.map(c => c[1]);
+  const preLeft   = Math.max(0, Math.floor(Math.min(...rxs)));
+  const preTop    = Math.max(0, Math.floor(Math.min(...rys)));
+  const preRight  = Math.min(origW - 1, Math.ceil(Math.max(...rxs)));
+  const preBottom = Math.min(origH - 1, Math.ceil(Math.max(...rys)));
+  const preW = Math.max(1, preRight - preLeft);
+  const preH = Math.max(1, preBottom - preTop);
+
+  if (Math.abs(angleDeg) < 0.5) {
+    return sharp(imageBuffer)
+      .extract({ left: preLeft, top: preTop, width: preW, height: preH })
+      .toBuffer();
   }
 
-  return pipeline.toBuffer();
+  // Dimensions of the rotated patch (sharp expands canvas to avoid clipping)
+  const absRad = Math.abs(angle);
+  const rotW = Math.ceil(preW * Math.cos(absRad) + preH * Math.sin(absRad));
+  const rotH = Math.ceil(preH * Math.cos(absRad) + preW * Math.sin(absRad));
+
+  // Where does the line centre (cx, cy) land in the rotated patch?
+  const rad  = -angle;
+  const cosR = Math.cos(rad), sinR = Math.sin(rad);
+  const dx   = (cx - preLeft) - preW / 2;
+  const dy   = (cy - preTop)  - preH / 2;
+  const newCx = rotW / 2 + dx * cosR - dy * sinR;
+  const newCy = rotH / 2 + dx * sinR + dy * cosR;
+
+  // Final crop centred on the now-horizontal baseline
+  const fL = Math.max(0,       Math.round(newCx - hw));
+  const fR = Math.min(rotW - 1, Math.round(newCx + hw));
+  const fT = Math.max(0,       Math.round(newCy - expandUp));
+  const fB = Math.min(rotH - 1, Math.round(newCy + expandDown));
+
+  return sharp(imageBuffer)
+    .extract({ left: preLeft, top: preTop, width: preW, height: preH })
+    .rotate(-angleDeg, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
+    .extract({ left: fL, top: fT, width: Math.max(1, fR - fL), height: Math.max(1, fB - fT) })
+    .toBuffer();
 }
 
 module.exports = { KrakenPipeline };
