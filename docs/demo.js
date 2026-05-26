@@ -518,7 +518,7 @@ function estimateLineHeight(lines, imageSize) {
   return gaps[Math.floor(gaps.length / 2)];
 }
 
-function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topline, opts = {}) {
+function extractLineCropCanvas(source, obb, origW, origH, lineHeight, topline, opts = {}) {
   const { cx, cy, angle, w: obbW } = obb;
   const upRatio    = opts.expandUp   ?? (topline ? 0.35 : 0.85);
   const downRatio  = opts.expandDown ?? (topline ? 0.85 : 0.35);
@@ -559,14 +559,14 @@ function extractLineCropCanvas(sourceCanvas, obb, origW, origH, lineHeight, topl
 
   const { left, top, right, bottom } = extractLineCropCanvas._lastBounds;
   if (Math.abs(angle * 180 / Math.PI) < 0.5) {
-    ctx.drawImage(sourceCanvas, left, top, right - left, bottom - top, 0, 0, finalW, finalH);
+    ctx.drawImage(source, left, top, right - left, bottom - top, 0, 0, finalW, finalH);
   } else {
     // Translate so (cx, cy) lands at the baseline anchor, rotate by -angle,
     // draw the full source — the text line emerges horizontal.
     ctx.save();
     ctx.translate(finalW / 2, expandUp);
     ctx.rotate(-angle);
-    ctx.drawImage(sourceCanvas, -cx, -cy);
+    ctx.drawImage(source, -cx, -cy);
     ctx.restore();
   }
 
@@ -603,15 +603,6 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
     return [];
   }
 
-  // Build a canvas from the source image for crop extraction
-  const sourceCanvas = document.createElement('canvas');
-  sourceCanvas.width  = imageSize.width;
-  sourceCanvas.height = imageSize.height;
-  const srcCtx = sourceCanvas.getContext('2d');
-  srcCtx.imageSmoothingEnabled  = true;
-  srcCtx.imageSmoothingQuality  = 'high';
-  srcCtx.drawImage(imgEl, 0, 0);
-
   const lineHeight = estimateLineHeight(lines, imageSize);
   const topline    = segmenter._meta.topline || false;
 
@@ -624,7 +615,7 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
     await yield_(); // release the main thread so the browser can repaint
 
     const cropCanvas = extractLineCropCanvas(
-      sourceCanvas, obb,
+      imgEl, obb,
       imageSize.width, imageSize.height,
       lineHeight, topline,
       { expandUp, expandDown }
