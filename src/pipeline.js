@@ -4,6 +4,9 @@ const sharp = require('sharp');
 const { KrakenSegmenter } = require('./segmenter');
 const { KrakenRecognizer } = require('./recognizer');
 
+/**
+ * End-to-end OCR pipeline: segment a page image, deskew line crops, and recognize text.
+ */
 class KrakenPipeline {
   constructor(segmenter, recognizer, opts) {
     this._segmenter = segmenter;
@@ -11,6 +14,18 @@ class KrakenPipeline {
     this._opts = opts;
   }
 
+  /**
+   * Create a pipeline from two `.js_mlmodel` files.
+   *
+   * @param {string} segmenterPath   Path to the segmentation model
+   * @param {string} recognizerPath  Path to the recognition model
+   * @param {object} [opts]
+   * @param {number}   [opts.expandUp=0.85]    Fraction of estimated line height to include above baseline
+   * @param {number}   [opts.expandDown=0.35]  Fraction of estimated line height to include below baseline
+   * @param {object}   [opts.segmenter={}]     Options forwarded to {@link KrakenSegmenter.create}
+   * @param {object}   [opts.recognizer={}]    Options forwarded to {@link KrakenRecognizer.create}
+   * @returns {Promise<KrakenPipeline>}
+   */
   static async create(segmenterPath, recognizerPath, opts = {}) {
     const [segmenter, recognizer] = await Promise.all([
       KrakenSegmenter.create(segmenterPath, opts.segmenter || {}),
@@ -19,6 +34,20 @@ class KrakenPipeline {
     return new KrakenPipeline(segmenter, recognizer, opts);
   }
 
+  /**
+   * Process a full page image end-to-end.
+   *
+   * @param {string|Buffer} image  File path or raw image Buffer
+   * @returns {Promise<Array<{
+   *   obb:   { cx, cy, w, h, angle, corners },
+   *   type:  string,
+   *   text:  string,
+   *   chars: Array<{ char: string, conf: number, x0: number, x1: number }>
+   * }>>}
+   *
+   * Results are in reading order. `chars` `x0`/`x1` are relative to the line crop,
+   * not the full page image.
+   */
   async process(image) {
     const imageBuffer = typeof image === 'string' ? fs.readFileSync(image) : image;
 

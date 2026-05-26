@@ -13,11 +13,23 @@ JavaScript runtime for [Kraken](https://github.com/mittagessen/kraken) OCR/HTR m
 
 ## Installation
 
+**As a dependency in your project:**
+
+```bash
+npm install github:cllg-project/kraken-js
+```
+
+```js
+const { KrakenRecognizer, KrakenSegmenter, KrakenPipeline } = require('kraken-js');
+```
+
+Requires Node.js ≥ 18. The `sharp` and `onnxruntime-node` native binaries are installed automatically.
+
+**To develop or run tests in this repo:**
+
 ```bash
 npm install
 ```
-
-Requires Node.js ≥ 18. The `sharp` and `onnxruntime-node` native binaries are installed automatically via npm.
 
 ## Model format: `.js_mlmodel`
 
@@ -253,7 +265,7 @@ Python Kraken represents each detected text line as a **polyline baseline** (a s
 ## Running tests
 
 ```bash
-npm test               # full suite (103 tests)
+npm test               # full suite (112 tests)
 npm run test:smoke     # quick end-to-end smoke test on example_line.png
 ```
 
@@ -283,15 +295,29 @@ tests/
     example_line.png            single line image
     ood_example.png             out-of-distribution line image
     fullpage.png                full manuscript page (2479×3508)
+    double_page.png             landscape double-page spread (1722×1435)
     example.txt                 ground-truth transcription of fullpage.png
     *.xml                       ALTO XML ground-truth segmentation
 
+docs/
+  index.html      browser demo (GitHub Pages)
+  demo.js         browser pipeline — onnxruntime-web + Canvas API, no server required
+
+debug_segmentation.js   CLI tool: overlay OBBs and crop polygons on an image for debugging
 export_kraken_onnx.py   Python export script (requires a Kraken-capable venv)
 ```
 
 ## Demo
 
-An interactive browser demo is available on GitHub Pages. Load the sample manuscript page or upload your own image, and run the full segmentation + recognition pipeline entirely client-side.
+An interactive browser demo is available at **https://cllg-project.github.io/kraken-js/**.
+
+Load the bundled sample page or drag-and-drop your own image, then click **Run OCR**. The full segmentation + recognition pipeline runs entirely client-side via WebAssembly — no server, no data upload.
+
+Two recognition models are available via the model selector:
+- **Greek print (Antiqua Graeca)** — Ancient Greek polytonic print
+- **Latin script print (CATMuS)** — Latin-script print ([CATMuS large](https://zenodo.org/records/10592716))
+
+The segmentation model is shared across both. A **Toggle overlay** button draws the oriented crop polygons (the exact regions sent to the recognizer) over the page image. Double-page spreads are split into columns automatically; a checkbox disables this if needed.
 
 ## Acknowledgements
 

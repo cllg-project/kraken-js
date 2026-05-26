@@ -7,6 +7,13 @@ const {
   extractOrientedBBoxes, scaleOBBs, sortByReadingOrder,
 } = require('./heatmap');
 
+/**
+ * Locates text lines on a full page image and returns oriented bounding boxes (OBBs).
+ *
+ * Each OBB is computed via PCA on the connected-component pixels in the baseline heatmap.
+ * Lines are returned in reading order; landscape double-page spreads are detected
+ * automatically and split into left/right columns (disable with `noColumnSplit`).
+ */
 class KrakenSegmenter {
   constructor(session, meta, opts) {
     this.session = session;
@@ -14,6 +21,17 @@ class KrakenSegmenter {
     this._opts = opts;
   }
 
+  /**
+   * Load a `.js_mlmodel` segmentation model.
+   *
+   * @param {string} modelPath  Path to the `.js_mlmodel` file
+   * @param {object} [opts]
+   * @param {number}   [opts.threshold=0.5]       Sigmoid threshold for baseline heatmap binarisation
+   * @param {number}   [opts.minArea=20]           Minimum connected-component area (heatmap pixels)
+   * @param {boolean}  [opts.noColumnSplit=false]  Disable double-page column detection
+   * @param {string[]} [opts.executionProviders=['cpu']]  ONNX Runtime execution providers
+   * @returns {Promise<KrakenSegmenter>}
+   */
   static async create(modelPath, opts = {}) {
     const { onnxBytes, metadata } = await loadJsMlmodel(modelPath);
     const ep = opts.executionProviders || ['cpu'];
@@ -21,6 +39,25 @@ class KrakenSegmenter {
     return new KrakenSegmenter(session, metadata, opts);
   }
 
+  /**
+   * Segment a page image into text lines.
+   *
+   * @param {string|Buffer} image  File path or raw image Buffer
+   * @returns {Promise<{
+   *   lines: Array<{ obb: {cx,cy,w,h,angle,corners}, type: string }>,
+   *   imageSize: { width: number, height: number }
+   * }>}
+   *
+   * `obb` fields (all in original image pixels):
+   *   - `cx`, `cy`   — baseline centre
+   *   - `w`          — length along the text direction
+   *   - `h`          — baseline thickness (~1–2 px; not the full glyph height)
+   *   - `angle`      — radians from +x axis, in (-π/2, π/2]
+   *   - `corners`    — `[[x,y]×4]` clockwise from top-left
+   *
+   * `type` is one of the class names from `metadata.class_mapping.baselines`
+   * (e.g. `'DefaultLine'` or `'DefaultLine-Margin'`).
+   */
   async segment(image) {
     const sharp = require('sharp');
 
