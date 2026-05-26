@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:smoke": "node test.js",
-    "build:demo": "esbuild docs/demo.js --bundle --format=esm --outfile=docs/demo.bundle.js"
+    "build:demo": "esbuild docs/demo.js --bundle --format=esm --outfile=docs/demo.bundle.js",
+    "demo": "npm run build:demo && node serve-demo.js"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

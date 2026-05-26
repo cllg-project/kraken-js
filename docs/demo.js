@@ -214,7 +214,7 @@ class BrowserSegmenter {
     const baselineIndices = Object.values(this._meta.class_mapping.baselines);
 
     const merged  = maxChannels(outData, C, Hout, Wout, baselineIndices);
-    const mask    = threshold(merged, 0.5);
+    const mask    = threshold(merged, Hout, Wout, 0.5);
     const { labels, count } = connectedComponents(mask, Hout, Wout);
 
     const colGapX = findColumnGapFromProfile(outData, Hout, Wout, baselineIndices, this._valleyRatio);
