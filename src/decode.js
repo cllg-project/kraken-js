@@ -17,20 +17,24 @@ function buildL2C(codec) {
  * Greedy CTC decoder.
  * Applies softmax internally so confidences are in [0,1] even when raw logits are passed.
  *
- * @param {Float32Array} logits  Raw logits or softmax probs, layout [C * W] (C classes, W timesteps)
+ * @param {Float32Array} logits  Raw logits or softmax probs, layout [C * stride] (C classes, stride timesteps)
  * @param {number}       C       Number of classes (including blank at 0)
- * @param {number}       W       Number of timesteps
+ * @param {number}       W       Number of timesteps to decode
+ * @param {number}       [stride=W]  Row stride of `logits`. Differs from `W` for an
+ *                       image in a batch whose valid output is shorter than the
+ *                       batch's padded width — decoding with the wrong stride reads
+ *                       misaligned memory and produces garbage.
  * @returns {Array<{label: number, t0: number, t1: number, conf: number}>}
  */
-function greedyCTC(logits, C, W) {
+function greedyCTC(logits, C, W, stride = W) {
   // Apply softmax per timestep so confidences are true probabilities
-  const probs = new Float32Array(logits.length);
+  const probs = new Float32Array(C * W);
   for (let t = 0; t < W; t++) {
     let maxVal = -Infinity;
-    for (let c = 0; c < C; c++) maxVal = Math.max(maxVal, logits[c * W + t]);
+    for (let c = 0; c < C; c++) maxVal = Math.max(maxVal, logits[c * stride + t]);
     let sum = 0;
     for (let c = 0; c < C; c++) {
-      const v = Math.exp(logits[c * W + t] - maxVal);
+      const v = Math.exp(logits[c * stride + t] - maxVal);
       probs[c * W + t] = v;
       sum += v;
     }

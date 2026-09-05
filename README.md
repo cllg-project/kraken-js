@@ -4,7 +4,7 @@ JavaScript runtime for [Kraken](https://github.com/mittagessen/kraken) OCR/HTR m
 
 ## Features
 
-- **`KrakenRecognizer`** — transcribe a line image to text with per-character confidence and position
+- **`KrakenRecognizer`** — transcribe a line image to text with per-character confidence and position (VGSL and PP-OCRv6 models)
 - **`KrakenSegmenter`** — locate text lines on a full page as oriented bounding boxes
 - **`KrakenPipeline`** — full end-to-end pipeline: segment a page, deskew line crops, recognize text
 - Single-file model format (`.js_mlmodel`) bundles the ONNX graph and metadata
@@ -43,10 +43,11 @@ metadata.json    model configuration (see below)
 Export a Kraken `.mlmodel` or `.safetensors` model with the provided Python script (requires a Kraken Python environment):
 
 ```bash
-# Install Kraken into a venv (once)
-python3 -m venv env && env/bin/pip install kraken
+# Install Kraken into a venv (once). onnx is required to write the graph,
+# onnxruntime to run the post-export parity check.
+python3 -m venv env && env/bin/pip install kraken onnx onnxruntime
 
-# Recognition model
+# Recognition model (VGSL or PP-OCRv6)
 env/bin/python3 export_kraken_onnx.py model_best.mlmodel
 # → model_best.js_mlmodel
 
@@ -56,7 +57,16 @@ env/bin/python3 export_kraken_onnx.py segmentation.mlmodel
 
 # Custom output path
 env/bin/python3 export_kraken_onnx.py model.mlmodel /path/to/output.js_mlmodel
+
+# Skip the parity check (not recommended)
+env/bin/python3 export_kraken_onnx.py model.mlmodel --no-check
 ```
+
+After writing the graph the exporter re-runs it under ONNX Runtime at several
+widths and compares against the original torch model. This is not a formality:
+the TorchScript tracer silently freezes shape-derived values into the graph, and
+without the check a model can export cleanly and then be wrong at every width but
+the one it was traced at.
 
 ### Recognition metadata
 
@@ -71,6 +81,36 @@ env/bin/python3 export_kraken_onnx.py model.mlmodel /path/to/output.js_mlmodel
   "codec": { " ": [1], "a": [2], "æ": [4, 5] }
 }
 ```
+
+### PP-OCRv6 recognition metadata
+
+Kraken ≥ 7.1 `PPOCRv6Model` recognizers (PPLCNetV4 backbone → LightSVTR neck → CTC head)
+export to the same container, with two extra graph tensors:
+
+```json
+{
+  "model_type": "recognition",
+  "architecture": "ppocrv6",
+  "variant": "medium",
+  "height": 96,
+  "channels": 3,
+  "pad": 16,
+  "one_channel_mode": "RGB",
+  "num_classes": 1630,
+  "width_subsampling": 8,
+  "seq_lens_input": true,
+  "vgsl": "",
+  "codec": { " ": [1], "a": [2] }
+}
+```
+
+`seq_lens_input` means the graph takes a second input, `seq_lens` (int64, one
+unpadded width per batch element), and returns a second output, `out_lens` (the
+valid output width per batch element). The neck mixes across the whole sequence
+with global attention, so the batch padding has to be masked out — `KrakenRecognizer`
+feeds and consumes both automatically, and preprocessing is unchanged from VGSL
+models. Everything else (`recognize`, `recognizeBatch`, `KrakenPipeline`) works
+the same way.
 
 ### Segmentation metadata
 
@@ -108,7 +148,7 @@ const results = await r.recognizeBatch(['line1.png', 'line2.png']);
 
 `chars` positions are scaled back to the original (pre-resize, pre-pad) image width.
 
-> **Note on batching**: mixing images of very different widths in `recognizeBatch` can corrupt results for the shorter images due to zero-padding interacting with the backward LSTM pass. Prefer `recognize` for variable-length lines, or group lines of similar width.
+> **Note on batching**: `recognizeBatch` pads shorter images to the widest in the batch. PP-OCRv6 models mask that padding out of their attention neck via `seq_lens`, so batching is safe; results are not bit-identical to single-line inference, because the backbone's SAME padding phase depends on the batch width (Kraken's own torch model behaves the same way). For VGSL models the padded frames are blank and the backward LSTM pass sees them, so grouping lines of similar width still gives the most faithful results.
 
 ### Segmentation
 
@@ -240,7 +280,7 @@ All models share the same normalization: pixels are divided by 255 then inverted
 
 | Step | Recognition | Segmentation |
 |------|------------|--------------|
-| Color mode | grayscale (L) or RGB per `channels` | RGB (3-channel) |
+| Color mode | grayscale (L) or RGB per `channels` (PP-OCRv6: always RGB) | RGB (3-channel) |
 | Resize | height = model `height`, proportional width | height = model `height`, proportional width |
 | Padding | `pad` px white on each side | none |
 | Normalize | `1 − x/255` | `1 − x/255` |
@@ -265,8 +305,15 @@ Python Kraken represents each detected text line as a **polyline baseline** (a s
 ## Running tests
 
 ```bash
-npm test               # full suite (112 tests)
+npm test               # full suite
 npm run test:smoke     # quick end-to-end smoke test on example_line.png
+```
+
+The PP-OCRv6 tests need a ~57 MB model fixture that is not committed; they skip
+until you build it (needs the Kraken venv described above):
+
+```bash
+npm run fixtures:ppocr   # downloads the model from Zenodo and exports it
 ```
 
 ## Project layout

@@ -1,2 +1,5 @@
 node_modules/
 docs/demo.bundle.js
+tests/fixtures/ppocr.js_mlmodel
+tests/fixtures/ppocr.safetensors
+__pycache__/

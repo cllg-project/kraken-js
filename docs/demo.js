@@ -268,9 +268,14 @@ class BrowserRecognizer {
     const { data: chw, width: W, height: H } = preprocessLineCanvas(imgEl, this._meta);
 
     const tensor = new ort.Tensor('float32', chw, [1, this._meta.channels, H, W]);
-    const output = await this._session.run({ input: tensor });
-    const outKey = Object.keys(output)[0];
-    const out    = output[outKey];
+    const feeds  = { input: tensor };
+    // PP-OCRv6 graphs take the unpadded width as a second input so their
+    // attention neck can mask the padding out (see src/recognizer.js).
+    if (this._meta.seq_lens_input || this._session.inputNames.includes('seq_lens')) {
+      feeds.seq_lens = new ort.Tensor('int64', BigInt64Array.from([BigInt(W)]), [1]);
+    }
+    const output = await this._session.run(feeds);
+    const out    = output['output'] ?? output[Object.keys(output)[0]];
 
     // output dims: [N, C, W_out] — data is in (C, W) layout for batch 0
     const [, C, Wout] = out.dims;

@@ -25,6 +25,11 @@ class KrakenRecognizer {
     this._session  = session;
     this._meta     = metadata;
     this._l2c      = buildL2C(metadata.codec);
+    // PP-OCRv6 graphs take the unpadded line widths as a second input: their
+    // attention neck mixes across the whole sequence, so the batch padding has
+    // to be masked out. VGSL graphs have a single input.
+    this._needsSeqLens = metadata.seq_lens_input === true ||
+                         (session.inputNames || []).includes('seq_lens');
   }
 
   /**
@@ -84,20 +89,29 @@ class KrakenRecognizer {
 
     const inputTensor = new ort.Tensor('float32', batchData, [N, channels, height, batchWidth]);
     const feeds = { input: inputTensor };
+    if (this._needsSeqLens) {
+      feeds.seq_lens = new ort.Tensor('int64', BigInt64Array.from(widths, BigInt), [N]);
+    }
     const results = await this._session.run(feeds);
 
     // output: (N, C, W_out) — Float32Array
     const output     = results['output'];
     const [, C, Wout] = output.dims;
     const outData    = output.data; // Float32Array of length N*C*Wout
+    // Models that take seq_lens also report the valid output length per image.
+    const outLens    = results['out_lens'];
 
     return tensors.map((t, b) => {
-      // Each image's output width is proportional to its input width
-      const outW = Math.round((t.width / batchWidth) * Wout);
+      // Each image's valid output width: reported by the model when available,
+      // otherwise proportional to its input width.
+      const outW = outLens
+        ? Number(outLens.data[b])
+        : Math.round((t.width / batchWidth) * Wout);
       // Slice this image's output from the batch: shape [C, Wout], but we only read outW cols
       const imgProbs = outData.subarray(b * C * Wout, (b + 1) * C * Wout);
 
-      const ctcLabels = greedyCTC(imgProbs, C, outW);
+      // imgProbs rows are Wout wide even when only outW columns are valid
+      const ctcLabels = greedyCTC(imgProbs, C, outW, Wout);
       const charSeq   = decodeCodec(ctcLabels, this._l2c);
 
       // Scale t0/t1 from output-space to input-pixel-space (excluding padding)

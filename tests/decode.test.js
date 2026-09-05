@@ -145,6 +145,27 @@ describe('greedyCTC', () => {
     const logits = new Float32Array(2); // C=2, W=1, all zeros → blank wins
     assert.deepEqual(greedyCTC(logits, 2, 1), []);
   });
+
+  // A batched image narrower than the batch is decoded from a buffer whose rows
+  // are the *padded* width; decoding it with the valid width as the stride reads
+  // misaligned memory and yields garbage.
+  test('stride decouples the row pitch from the decoded length', () => {
+    const C = 3, STRIDE = 5, W = 3;
+    // rows are STRIDE wide; only the first W columns are valid, the tail is junk
+    const logits = new Float32Array(C * STRIDE);
+    const set = (c, t, v) => { logits[c * STRIDE + t] = v; };
+    set(1, 0, 10);  // class 1
+    set(0, 1, 10);  // blank
+    set(2, 2, 10);  // class 2
+    set(1, 3, 99); set(2, 4, 99); // padding junk, must not be decoded
+    const result = greedyCTC(logits, C, W, STRIDE);
+    assert.deepEqual(result.map(r => r.label), [1, 2]);
+  });
+
+  test('stride defaults to W for unpadded input', () => {
+    const logits = makeLogits(3, 3, [[0, 1], [1, 0], [2, 2]]);
+    assert.deepEqual(greedyCTC(logits, 3, 3), greedyCTC(logits, 3, 3, 3));
+  });
 });
 
 // ---------------------------------------------------------------------------
