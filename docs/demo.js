@@ -22,25 +22,120 @@ import { buildL2C, greedyCTC, decodeCodec } from '../src/decode.js';
 /* global ort */
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
 
+// Run the WASM backend in ONNX Runtime's own worker. Without this, compiling the
+// model and every session.run() happen on the page's thread — a full-page
+// segmentation pass takes seconds and the UI cannot repaint for its duration.
+ort.env.wasm.proxy = true;
+
+// Multi-threaded WASM only exists on a cross-origin isolated page (COOP/COEP).
+// serve-demo.js sends those headers; GitHub Pages cannot, and there ORT stays
+// single-threaded — slower, but off the main thread either way.
+if (globalThis.crossOriginIsolated) {
+  ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+}
+
 // ---------------------------------------------------------------------------
 // .js_mlmodel loader (uses JSZip global)
 // ---------------------------------------------------------------------------
 
-async function loadJsMlmodel(url) {
+/**
+ * Sessions already built, keyed by model URL. Models are tens of megabytes and
+ * compiling one costs seconds, so a session is created once per page load and
+ * reused across runs and model switches. Promises are cached rather than
+ * resolved values, so concurrent loads of the same URL share one download.
+ *
+ * @type {Map<string, Promise<{session: ort.InferenceSession, meta: object}>>}
+ */
+const _sessionCache = new Map();
+
+/** Whether a model is already loaded, so callers can skip the loading status. */
+export function isModelCached(url) {
+  return _sessionCache.has(url);
+}
+
+/**
+ * Fetch a .js_mlmodel and build an inference session, reporting download progress.
+ *
+ * @param {string} url
+ * @param {{ onProgress?: (fraction: number|null) => void }} [opts]
+ *        onProgress receives 0..1, or null when the size is unknown.
+ */
+function loadJsMlmodel(url, opts = {}) {
+  const cached = _sessionCache.get(url);
+  if (cached) return cached;
+
+  const pending = _loadJsMlmodel(url, opts).catch(err => {
+    // A failed load must not poison the cache — let the next run retry.
+    _sessionCache.delete(url);
+    throw err;
+  });
+  _sessionCache.set(url, pending);
+  return pending;
+}
+
+async function _loadJsMlmodel(url, { onProgress } = {}) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status} ${resp.statusText}`);
-  const buf = await resp.arrayBuffer();
+
+  const buf = await readBodyWithProgress(resp, onProgress);
   const zip = await JSZip.loadAsync(buf);
 
   const metaStr  = await zip.file('metadata.json').async('string');
   const onnxBuf  = await zip.file('model.onnx').async('arraybuffer');
   const meta     = JSON.parse(metaStr);
 
-  const session  = await ort.InferenceSession.create(onnxBuf, {
-    executionProviders: ['wasm'],
-  });
+  const session  = await createSession(onnxBuf);
 
   return { session, meta };
+}
+
+/**
+ * Read a response body, reporting progress against Content-Length.
+ * Falls back to a plain arrayBuffer() when streaming or the length is unavailable.
+ */
+async function readBodyWithProgress(resp, onProgress) {
+  const total = Number(resp.headers.get('content-length')) || 0;
+  if (!onProgress || !resp.body || !total) {
+    if (onProgress) onProgress(null);
+    return resp.arrayBuffer();
+  }
+
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(Math.min(1, received / total));
+  }
+
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out.buffer;
+}
+
+/**
+ * Build a session, falling back to in-page execution if the proxy worker fails.
+ *
+ * The fallback matters because a broken proxy would otherwise take the whole demo
+ * down; running on the main thread is slow and blocking, but it works.
+ */
+async function createSession(onnxBuf) {
+  try {
+    return await ort.InferenceSession.create(onnxBuf, { executionProviders: ['wasm'] });
+  } catch (err) {
+    if (!ort.env.wasm.proxy) throw err;
+    console.warn('ONNX Runtime proxy worker unavailable, falling back to the main ' +
+                 'thread (the page will block during inference):', err);
+    ort.env.wasm.proxy = false;
+    return ort.InferenceSession.create(onnxBuf, { executionProviders: ['wasm'] });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,22 +191,15 @@ function preprocessPageCanvas(img, meta) {
     return { data: out, width: W, height: H };
   }
 
-  // RGB: normalize + invert, then HWC → CHW
-  const hwc = new Float32Array(H * W * 3);
-  for (let i = 0; i < H * W; i++) {
-    hwc[i * 3    ] = 1.0 - raw[i * 4    ] / 255.0;
-    hwc[i * 3 + 1] = 1.0 - raw[i * 4 + 1] / 255.0;
-    hwc[i * 3 + 2] = 1.0 - raw[i * 4 + 2] / 255.0;
-  }
-
-  // HWC → CHW
-  const chw = new Float32Array(3 * H * W);
-  for (let h = 0; h < H; h++) {
-    for (let w = 0; w < W; w++) {
-      for (let ch = 0; ch < 3; ch++) {
-        chw[ch * H * W + h * W + w] = hwc[(h * W + w) * 3 + ch];
-      }
-    }
+  // RGB: normalize + invert straight into CHW. Going via an intermediate HWC
+  // array would mean a second pass and a second ~28 MB allocation on a full page.
+  const plane = H * W;
+  const chw = new Float32Array(3 * plane);
+  for (let i = 0; i < plane; i++) {
+    const src = i * 4;
+    chw[i            ] = 1.0 - raw[src    ] / 255.0;
+    chw[i + plane    ] = 1.0 - raw[src + 1] / 255.0;
+    chw[i + 2 * plane] = 1.0 - raw[src + 2] / 255.0;
   }
 
   return { data: chw, width: W, height: H };
@@ -192,7 +280,7 @@ class BrowserSegmenter {
   }
 
   static async create(url, opts = {}) {
-    const { session, meta } = await loadJsMlmodel(url);
+    const { session, meta } = await loadJsMlmodel(url, { onProgress: opts.onProgress });
     return new BrowserSegmenter(session, meta, opts);
   }
 
@@ -259,8 +347,8 @@ class BrowserRecognizer {
     this._l2c     = buildL2C(meta.codec);
   }
 
-  static async create(url) {
-    const { session, meta } = await loadJsMlmodel(url);
+  static async create(url, opts = {}) {
+    const { session, meta } = await loadJsMlmodel(url, { onProgress: opts.onProgress });
     return new BrowserRecognizer(session, meta);
   }
 
@@ -373,6 +461,23 @@ function extractLineCropCanvas(source, obb, origW, origH, lineHeight, topline, o
 // ---------------------------------------------------------------------------
 
 /**
+ * Build an onProgress callback that reports model loading through onStatus.
+ * Cached models report once and never show a percentage.
+ */
+function loadReporter(name, url, onStatus) {
+  if (isModelCached(url)) {
+    onStatus(`Using cached ${name} model…`);
+    return undefined;
+  }
+  onStatus(`Loading ${name} model…`);
+  return fraction => {
+    onStatus(fraction === null
+      ? `Loading ${name} model…`
+      : `Loading ${name} model… ${Math.round(fraction * 100)}%`);
+  };
+}
+
+/**
  * Run the full segmentation + recognition pipeline on an image element.
  *
  * @param {HTMLImageElement} imgEl
@@ -384,11 +489,14 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
   const { onStatus = () => {}, onLine = () => {}, noColumnSplit = false,
           expandUp, expandDown } = opts;
 
-  onStatus('Loading segmentation model…');
-  const segmenter = await BrowserSegmenter.create(segUrl, { noColumnSplit });
+  const segmenter = await BrowserSegmenter.create(segUrl, {
+    noColumnSplit,
+    onProgress: loadReporter('segmentation', segUrl, onStatus),
+  });
 
-  onStatus('Loading recognition model…');
-  const recognizer = await BrowserRecognizer.create(recUrl);
+  const recognizer = await BrowserRecognizer.create(recUrl, {
+    onProgress: loadReporter('recognition', recUrl, onStatus),
+  });
 
   onStatus('Segmenting page…');
   const { lines, imageSize } = await segmenter.segment(imgEl);

@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>kraken-js — OCR/HTR Demo</title>
   <!-- Fetched early (defer) so the browser downloads them while rendering the page -->
-  <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.wasm.min.js"></script>
+  <!-- crossorigin: required for these to load on a cross-origin isolated page
+       (serve-demo.js sends COOP/COEP so ONNX Runtime can use WASM threads) -->
+  <script defer crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script defer crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.wasm.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 

@@ -35,7 +35,19 @@ http.createServer((req, res) => {
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      // Explicit length so the demo can report model download progress; without
+      // it Node falls back to chunked encoding and the loader has no total.
+      'Content-Length': data.length,
+      // Cross-origin isolation, which is what unlocks multi-threaded WASM in
+      // ONNX Runtime. GitHub Pages cannot send these, so the deployed demo runs
+      // single-threaded (still off the main thread — see ort.env.wasm.proxy).
+      // Cross-origin scripts must therefore be loaded with crossorigin="anonymous";
+      // see the CDN script tags in docs/index.html.
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    });
     res.end(data);
   });
 }).listen(PORT, () => {

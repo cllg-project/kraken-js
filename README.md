@@ -366,6 +366,24 @@ Two recognition models are available via the model selector:
 
 The segmentation model is shared across both. A **Toggle overlay** button draws the oriented crop polygons (the exact regions sent to the recognizer) over the page image. Double-page spreads are split into columns automatically; a checkbox disables this if needed.
 
+### Keeping the page responsive
+
+Inference is heavy enough to freeze a page if it runs on the main thread — a full-page
+segmentation pass is seconds of uninterruptible work. The demo avoids that:
+
+- `ort.env.wasm.proxy = true` puts ONNX Runtime's model compilation and every `run()`
+  in its own worker. Measured on the sample page: 5.5 s of blocked main thread and a
+  3.8 s single freeze without it, versus 0.1 s blocked and a 52 ms longest task with it.
+- Sessions are cached per model URL, so a second run — or switching recognition models
+  and back — costs no download and no recompilation.
+- Model downloads report progress through the status line.
+
+`npm run demo` additionally serves `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`,
+which is what lets ONNX Runtime use multi-threaded WASM (6 s vs 17 s for the sample page).
+GitHub Pages cannot send those headers, so the deployed demo is single-threaded — slower,
+but still off the main thread and responsive. Because those headers apply locally, the
+jsdelivr `<script>` tags in `docs/index.html` must carry `crossorigin="anonymous"`.
+
 ## Acknowledgements
 
 This JavaScript runtime is built on top of [Kraken](https://github.com/mittagessen/kraken), the OCR/HTR engine created and maintained by [Benjamin Kiessling](https://github.com/mittagessen).
