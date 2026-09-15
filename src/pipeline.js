@@ -39,14 +39,19 @@ class KrakenPipeline {
    *
    * @param {string|Buffer} image  File path or raw image Buffer
    * @returns {Promise<Array<{
-   *   obb:   { cx, cy, w, h, angle, corners },
-   *   type:  string,
-   *   text:  string,
-   *   chars: Array<{ char: string, conf: number, x0: number, x1: number }>
+   *   obb:     { cx, cy, w, h, angle, corners },
+   *   polygon: Array<[number, number]>,
+   *   type:    string,
+   *   text:    string,
+   *   chars:   Array<{ char: string, conf: number, x0: number, x1: number }>
    * }>>}
    *
    * Results are in reading order. `chars` `x0`/`x1` are relative to the line crop,
-   * not the full page image.
+   * not the full page image. `polygon` is the expanded above/below-baseline
+   * quadrilateral (image-space, 4 [x, y] corners, same convention as `obb.corners`)
+   * actually used to build the crop that was recognized — callers that need line
+   * geometry for display or persistence should use this instead of re-deriving it
+   * from `obb`, so geometry never drifts from what was actually cropped.
    */
   async process(image) {
     const imageBuffer = typeof image === 'string' ? fs.readFileSync(image) : image;
@@ -65,10 +70,11 @@ class KrakenPipeline {
       )
     );
 
-    const recognized = await Promise.all(crops.map(crop => this._recognizer.recognize(crop)));
+    const recognized = await Promise.all(crops.map(({ buffer }) => this._recognizer.recognize(buffer)));
 
     return lines.map(({ obb, type }, i) => ({
       obb,
+      polygon: crops[i].polygon,
       type,
       text: recognized[i].text,
       chars: recognized[i].chars,
@@ -107,6 +113,10 @@ function estimateLineHeight(lines, imageSize) {
  *   2. Extract the axis-aligned bounding box of those 4 corners.
  *   3. Rotate the extracted patch by -angle so text becomes horizontal.
  *   4. Re-extract the now-axis-aligned crop from the rotated patch.
+ *
+ * @returns {Promise<{ buffer: Buffer, polygon: Array<[number, number]> }>}
+ *   `polygon` is the image-space quadrilateral computed in step 1 (TL, TR, BR, BL),
+ *   returned so callers have the exact geometry that produced `buffer`.
  */
 async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topline, opts = {}) {
   const { cx, cy, angle, w: obbW } = obb;
@@ -141,9 +151,10 @@ async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topli
   const preH = Math.max(1, preBottom - preTop);
 
   if (Math.abs(angleDeg) < 0.5) {
-    return sharp(imageBuffer)
+    const buffer = await sharp(imageBuffer)
       .extract({ left: preLeft, top: preTop, width: preW, height: preH })
       .toBuffer();
+    return { buffer, polygon: rc };
   }
 
   // Dimensions of the rotated patch (sharp expands canvas to avoid clipping)
@@ -165,11 +176,12 @@ async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topli
   const fT = Math.max(0,       Math.round(newCy - expandUp));
   const fB = Math.min(rotH - 1, Math.round(newCy + expandDown));
 
-  return sharp(imageBuffer)
+  const buffer = await sharp(imageBuffer)
     .extract({ left: preLeft, top: preTop, width: preW, height: preH })
     .rotate(-angleDeg, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
     .extract({ left: fL, top: fT, width: Math.max(1, fR - fL), height: Math.max(1, fB - fT) })
     .toBuffer();
+  return { buffer, polygon: rc };
 }
 
 module.exports = { KrakenPipeline };

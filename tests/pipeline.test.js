@@ -50,12 +50,28 @@ describe('process result shape', () => {
     assert.ok(results.length <= 150, `too many: ${results.length}`);
   });
 
-  test('each result has obb, type, text, chars', () => {
+  test('each result has obb, polygon, type, text, chars', () => {
     for (const r of results) {
-      assert.ok('obb'   in r, 'missing obb');
-      assert.ok('type'  in r, 'missing type');
-      assert.ok('text'  in r, 'missing text');
-      assert.ok('chars' in r, 'missing chars');
+      assert.ok('obb'     in r, 'missing obb');
+      assert.ok('polygon' in r, 'missing polygon');
+      assert.ok('type'    in r, 'missing type');
+      assert.ok('text'    in r, 'missing text');
+      assert.ok('chars'   in r, 'missing chars');
+    }
+  });
+
+  test('polygon is 4 [x, y] corners centred near the baseline', () => {
+    for (const { obb, polygon } of results) {
+      assert.equal(polygon.length, 4);
+      for (const corner of polygon) {
+        assert.equal(corner.length, 2);
+        assert.ok(Number.isFinite(corner[0]));
+        assert.ok(Number.isFinite(corner[1]));
+      }
+      const cx = polygon.reduce((s, c) => s + c[0], 0) / 4;
+      const cy = polygon.reduce((s, c) => s + c[1], 0) / 4;
+      assert.ok(Math.abs(cx - obb.cx) < obb.w + 50, 'polygon centre x far from obb.cx');
+      assert.ok(Math.abs(cy - obb.cy) < obb.w + 50, 'polygon centre y far from obb.cy');
     }
   });
 
