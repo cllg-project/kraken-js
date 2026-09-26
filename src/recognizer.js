@@ -1,6 +1,7 @@
 'use strict';
 const ort = require('onnxruntime-node');
 const { loadJsMlmodel } = require('./loader');
+const { buildSessionOptions } = require('./session');
 const { preprocessImage, buildBatch, toChw } = require('./preprocess');
 const { buildL2C, greedyCTC, decodeCodec } = require('./decode');
 
@@ -39,14 +40,14 @@ class KrakenRecognizer {
    * @param {object}   [opts]
    * @param {string[]} [opts.executionProviders]  e.g. ['cuda','cpu'], ['coreml','cpu']
    *                   Defaults to ['cpu']. Pass ['webgpu','cpu'] in browser contexts.
+   * @param {number}   [opts.threads]         Threads per inference (default: one per physical core)
+   * @param {boolean}  [opts.allowSpinning]   `false` stops idle threads from busy-waiting
+   * @param {object}   [opts.sessionOptions]  Raw ONNX Runtime session options
    * @returns {Promise<KrakenRecognizer>}
    */
   static async create(modelPath, opts = {}) {
     const { onnxBytes, metadata } = loadJsMlmodel(modelPath);
-    const providers = opts.executionProviders ?? ['cpu'];
-    const session = await ort.InferenceSession.create(onnxBytes, {
-      executionProviders: providers,
-    });
+    const session = await ort.InferenceSession.create(onnxBytes, buildSessionOptions(opts));
     return new KrakenRecognizer(session, metadata);
   }
 

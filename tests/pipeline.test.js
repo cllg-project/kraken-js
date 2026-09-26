@@ -33,6 +33,18 @@ describe('KrakenPipeline.create', () => {
   test('throws on non-existent recognizer model', async () => {
     await assert.rejects(() => KrakenPipeline.create(SEG_MODEL, '/no/rec.js_mlmodel'));
   });
+
+  test('rejects invalid resource limits', async () => {
+    await assert.rejects(() => KrakenPipeline.create(SEG_MODEL, REC_MODEL, { threads: 0 }), TypeError);
+    await assert.rejects(() => KrakenPipeline.create(SEG_MODEL, REC_MODEL, { sharpConcurrency: 0 }), TypeError);
+  });
+
+  test('thread-limited pipeline gives the same lines and text as the default one', async () => {
+    const limited = await KrakenPipeline.create(SEG_MODEL, REC_MODEL, { threads: 2, allowSpinning: false });
+    const limitedResults = await limited.process(FULLPAGE);
+    assert.equal(limitedResults.length, results.length);
+    assert.deepEqual(limitedResults.map(r => r.text), results.map(r => r.text));
+  });
 });
 
 // ---------------------------------------------------------------------------

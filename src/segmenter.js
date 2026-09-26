@@ -1,6 +1,7 @@
 'use strict';
 const ort = require('onnxruntime-node');
 const { loadJsMlmodel } = require('./loader');
+const { buildSessionOptions } = require('./session');
 const { preprocessPageImage, toChw } = require('./preprocess');
 const {
   maxChannels, threshold, connectedComponents,
@@ -32,12 +33,14 @@ class KrakenSegmenter {
    * @param {boolean}  [opts.noColumnSplit=false]  Disable double-page column detection
    * @param {number}   [opts.valleyRatio=0.2]      Column-gap sensitivity: trough must be < median × this
    * @param {string[]} [opts.executionProviders=['cpu']]  ONNX Runtime execution providers
+   * @param {number}   [opts.threads]         Threads per inference (default: one per physical core)
+   * @param {boolean}  [opts.allowSpinning]   `false` stops idle threads from busy-waiting
+   * @param {object}   [opts.sessionOptions]  Raw ONNX Runtime session options
    * @returns {Promise<KrakenSegmenter>}
    */
   static async create(modelPath, opts = {}) {
     const { onnxBytes, metadata } = await loadJsMlmodel(modelPath);
-    const ep = opts.executionProviders || ['cpu'];
-    const session = await ort.InferenceSession.create(onnxBytes, { executionProviders: ep });
+    const session = await ort.InferenceSession.create(onnxBytes, buildSessionOptions(opts));
     return new KrakenSegmenter(session, metadata, opts);
   }
 

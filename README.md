@@ -198,6 +198,11 @@ Other segmenter options:
 | `minArea` | `20` | Minimum connected-component area in heatmap pixels |
 | `noColumnSplit` | `false` | Disable double-page column detection |
 | `executionProviders` | `['cpu']` | ONNX Runtime execution providers |
+| `threads` | one per physical core | Threads per inference (see [Limiting CPU usage](#limiting-cpu-usage)) |
+| `allowSpinning` | ONNX Runtime default (`true`) | `false` stops idle threads from busy-waiting between runs |
+| `sessionOptions` | `{}` | Raw ONNX Runtime session options (override the two above) |
+
+`KrakenRecognizer.create` accepts the same `executionProviders`, `threads`, `allowSpinning` and `sessionOptions` options.
 
 ### Full pipeline
 
@@ -232,14 +237,44 @@ Pipeline options (passed as the third argument to `KrakenPipeline.create`):
 |--------|---------|-------------|
 | `expandUp` | `0.85` | Fraction of estimated line height to include above the baseline |
 | `expandDown` | `0.35` | Fraction of estimated line height to include below the baseline |
-| `segmenter` | `{}` | Options forwarded to `KrakenSegmenter.create` |
-| `recognizer` | `{}` | Options forwarded to `KrakenRecognizer.create` |
+| `threads` | one per physical core | Threads per inference, for both models |
+| `allowSpinning` | ONNX Runtime default (`true`) | `false` stops idle threads of both models from busy-waiting |
+| `sharpConcurrency` | sharp default (one per core) | Cap libvips threads. **Process-wide**: calls `sharp.concurrency(n)` |
+| `segmenter` | `{}` | Options forwarded to `KrakenSegmenter.create` (override the pipeline-level values) |
+| `recognizer` | `{}` | Options forwarded to `KrakenRecognizer.create` (override the pipeline-level values) |
 
 ```js
 const pipeline = await KrakenPipeline.create(segPath, recPath, {
   expandDown: 0.5,  // more room for descenders
 });
 ```
+
+### Limiting CPU usage
+
+By default ONNX Runtime gives each session one thread per physical core, and idle
+threads busy-wait between inferences, so a running pipeline keeps every core at 100%.
+For a desktop application that is rarely worth it:
+
+```js
+const pipeline = await KrakenPipeline.create(segPath, recPath, {
+  threads: 4,            // per inference, for both models
+  allowSpinning: false,  // let idle threads sleep
+});
+```
+
+Measured on `tests/fixtures/fullpage.png` (35 lines, 24 logical cores, single runs):
+
+| Options | Wall time | Average cores busy | Threads |
+|---|---|---|---|
+| defaults | 4.4 s | 20.0 | 59 |
+| `allowSpinning: false` | 4.2 s | 7.3 | 59 |
+| `threads: 4` | 4.5 s | 3.9 | 19 |
+| `threads: 4, allowSpinning: false` | 5.0 s | 3.0 | 19 |
+| `threads: 2, allowSpinning: false` | 7.0 s | 2.0 | 15 |
+
+Note that `onnxruntime-node` runs each inference synchronously on the JavaScript thread
+(after a `setImmediate`), so inferences never overlap and block the event loop while
+they run; in Electron, run the pipeline away from the UI's process if that matters.
 
 ### Hardware acceleration
 

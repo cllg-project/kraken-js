@@ -22,14 +22,33 @@ class KrakenPipeline {
    * @param {object} [opts]
    * @param {number}   [opts.expandUp=0.85]    Fraction of estimated line height to include above baseline
    * @param {number}   [opts.expandDown=0.35]  Fraction of estimated line height to include below baseline
+   * @param {number}   [opts.threads]          Threads per inference for both models (see
+   *                                           {@link KrakenSegmenter.create}); unset = one per
+   *                                           physical core, which saturates many-core machines
+   * @param {boolean}  [opts.allowSpinning]    `false` stops idle ONNX threads from busy-waiting
+   *                                           between runs, for both models
+   * @param {number}   [opts.sharpConcurrency] Cap libvips (sharp) threads. PROCESS-WIDE: calls
+   *                                           `sharp.concurrency(n)`, affecting every sharp user
+   *                                           in the process
    * @param {object}   [opts.segmenter={}]     Options forwarded to {@link KrakenSegmenter.create}
+   *                                           (override `threads`/`allowSpinning` for it)
    * @param {object}   [opts.recognizer={}]    Options forwarded to {@link KrakenRecognizer.create}
    * @returns {Promise<KrakenPipeline>}
    */
   static async create(segmenterPath, recognizerPath, opts = {}) {
+    if (opts.sharpConcurrency !== undefined) {
+      if (!Number.isInteger(opts.sharpConcurrency) || opts.sharpConcurrency < 1) {
+        throw new TypeError(`sharpConcurrency must be a positive integer, got ${opts.sharpConcurrency}`);
+      }
+      sharp.concurrency(opts.sharpConcurrency);
+    }
+    // Pipeline-level resource limits apply to both models unless set per model.
+    const shared = {};
+    if (opts.threads !== undefined) shared.threads = opts.threads;
+    if (opts.allowSpinning !== undefined) shared.allowSpinning = opts.allowSpinning;
     const [segmenter, recognizer] = await Promise.all([
-      KrakenSegmenter.create(segmenterPath, opts.segmenter || {}),
-      KrakenRecognizer.create(recognizerPath, opts.recognizer || {}),
+      KrakenSegmenter.create(segmenterPath, { ...shared, ...(opts.segmenter || {}) }),
+      KrakenRecognizer.create(recognizerPath, { ...shared, ...(opts.recognizer || {}) }),
     ]);
     return new KrakenPipeline(segmenter, recognizer, opts);
   }
