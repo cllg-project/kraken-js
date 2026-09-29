@@ -3,6 +3,7 @@ const ort = require('onnxruntime-node');
 const { loadJsMlmodel } = require('./loader');
 const { buildSessionOptions } = require('./session');
 const { preprocessPageImage, toChw } = require('./preprocess');
+const { DFineSegmenter } = require('./dfine');
 const {
   maxChannels, threshold, connectedComponents,
   extractOrientedBBoxes, scaleOBBs, sortByReadingOrder,
@@ -26,6 +27,11 @@ class KrakenSegmenter {
   /**
    * Load a `.js_mlmodel` segmentation model.
    *
+   * D-FINE models (`metadata.architecture === 'dfine'`) are handed to
+   * {@link DFineSegmenter}, whose instance is returned instead; its `segment()`
+   * returns lines of the same shape (plus `bbox`, `polygon`, `score`) and adds
+   * `regions`. Its options are documented on {@link DFineSegmenter.create}.
+   *
    * @param {string} modelPath  Path to the `.js_mlmodel` file
    * @param {object} [opts]
    * @param {number}   [opts.threshold=0.5]       Sigmoid threshold for baseline heatmap binarisation
@@ -36,10 +42,13 @@ class KrakenSegmenter {
    * @param {number}   [opts.threads]         Threads per inference (default: one per physical core)
    * @param {boolean}  [opts.allowSpinning]   `false` stops idle threads from busy-waiting
    * @param {object}   [opts.sessionOptions]  Raw ONNX Runtime session options
-   * @returns {Promise<KrakenSegmenter>}
+   * @returns {Promise<KrakenSegmenter|DFineSegmenter>}
    */
   static async create(modelPath, opts = {}) {
     const { onnxBytes, metadata } = await loadJsMlmodel(modelPath);
+    if (metadata.architecture === 'dfine') {
+      return DFineSegmenter.fromModel(onnxBytes, metadata, opts);
+    }
     const session = await ort.InferenceSession.create(onnxBytes, buildSessionOptions(opts));
     return new KrakenSegmenter(session, metadata, opts);
   }

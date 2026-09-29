@@ -6,6 +6,7 @@ JavaScript runtime for [Kraken](https://github.com/mittagessen/kraken) OCR/HTR m
 
 - **`KrakenRecognizer`** — transcribe a line image to text with per-character confidence and position (VGSL and PP-OCRv6 models)
 - **`KrakenSegmenter`** — locate text lines on a full page as oriented bounding boxes
+- **`DFineSegmenter`** — detect text lines and layout regions as boxes with [D-FINE](https://pypi.org/project/dfine-kraken/) models (nano, small, medium, large and extra_large variants)
 - **`KrakenPipeline`** — full end-to-end pipeline: segment a page, deskew line crops, recognize text
 - Single-file model format (`.js_mlmodel`) bundles the ONNX graph and metadata
 - Hardware acceleration via ONNX Runtime execution providers (CoreML, DirectML, CUDA, WebGPU)
@@ -54,6 +55,11 @@ env/bin/python3 export_kraken_onnx.py model_best.mlmodel
 # Segmentation model
 env/bin/python3 export_kraken_onnx.py segmentation.mlmodel
 # → segmentation.js_mlmodel
+
+# D-FINE layout/line detection model (needs `pip install dfine_kraken`);
+# training checkpoints can be passed directly
+env/bin/python3 export_kraken_onnx.py ladas_n.safetensors
+env/bin/python3 export_kraken_onnx.py checkpoint_47-0.9328.ckpt dfine_medium.js_mlmodel
 
 # Custom output path
 env/bin/python3 export_kraken_onnx.py model.mlmodel /path/to/output.js_mlmodel
@@ -127,6 +133,42 @@ the same way.
   "vgsl": "[1,1800,0,3 Cr7,7,64 ... O2l4]"
 }
 ```
+
+### D-FINE segmentation metadata
+
+[dfine-kraken](https://pypi.org/project/dfine-kraken/) object detection models
+export to the same container. Every variant — `nano`, `small`, `medium`, `large`,
+`extra_large` — has the same graph signature: one fixed-size `input`
+(`1 × 3 × H × W`, `image_size` is `[H, W]`) and two outputs, `scores`
+(`1 × queries × num_classes`, sigmoid class scores) and `boxes`
+(`1 × queries × 4`, normalized `cx, cy, w, h`).
+
+```json
+{
+  "model_type": "segmentation",
+  "architecture": "dfine",
+  "variant": "medium",
+  "image_size": [1280, 1280],
+  "channels": 3,
+  "num_classes": 12,
+  "num_top_queries": 300,
+  "class_mapping": {
+    "lines": {},
+    "regions": { "MainZone": 2, "MarginTextZone": 3 }
+  }
+}
+```
+
+The graph is only valid at batch size 1 (dfine-kraken's decoder takes a
+shape-dependent branch the ONNX tracer freezes), which is how `DFineSegmenter`
+runs it. Class indices that appear in neither `lines` nor `regions` (e.g. the
+reserved `0`/`1`) are never reported.
+
+> **Checkpoints**: `ketos convert` currently fails on D-FINE checkpoints with
+> *"No registered lightning module matches the configuration class
+> DFINESegmentationTrainingConfig"* (dfine_kraken ≤ 0.4.3 does not declare the
+> `_config_class` that kraken 7.1 looks up). `export_kraken_onnx.py` works around
+> this and converts `.ckpt` files itself.
 
 ## Usage
 
@@ -204,6 +246,52 @@ Other segmenter options:
 
 `KrakenRecognizer.create` accepts the same `executionProviders`, `threads`, `allowSpinning` and `sessionOptions` options.
 
+### D-FINE segmentation
+
+`KrakenSegmenter.create` recognises D-FINE models from their metadata and returns a
+`DFineSegmenter` (which you can also create directly):
+
+```js
+const { KrakenSegmenter } = require('./src');
+
+const seg = await KrakenSegmenter.create('./ladas_n.js_mlmodel');
+const { lines, regions, imageSize } = await seg.segment('./page.png');
+// regions: [{ bbox, polygon, type, score }, ...]  — top-to-bottom, left-to-right
+// lines:   [{ bbox, polygon, obb, type, score, regions }, ...]  — reading order
+```
+
+All coordinates are in original image pixels:
+
+```js
+{
+  bbox:    [x0, y0, x1, y1],              // axis-aligned box, clamped to the image
+  polygon: [[x,y], [x,y], [x,y], [x,y]],  // the box, clockwise from top-left
+  type:    'MainZone-P',                  // class name from class_mapping
+  score:   0.93,                          // class score
+  // lines only:
+  obb:     { cx, cy, w, h, angle: 0, corners },  // the box in the VGSL segmenter's shape
+  regions: [0, 2],                               // indices of regions containing the line centre
+}
+```
+
+Post-processing follows dfine-kraken's `predict()`: the image is resized to
+`image_size` (aspect ratio not preserved), the top `num_top_queries`
+(query, class) pairs are kept, and those scoring under the threshold dropped. As
+in dfine-kraken there is **no NMS**, so overlapping boxes of the same class can be
+reported. A layout model with only region classes returns `lines: []`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `scoreThreshold` | `0.5` | Minimum class score for a detection |
+| `noColumnSplit` | `false` | Disable double-page column detection when ordering lines |
+| `executionProviders`, `threads`, `allowSpinning`, `sessionOptions` | | As for `KrakenSegmenter` |
+
+Measured on `tests/fixtures/fullpage.png` (CPU, 1280×1280 input): nano ≈ 0.25 s,
+medium ≈ 0.6 s, large ≈ 0.7 s, extra_large ≈ 1.2 s per page. Detections match
+dfine-kraken to within a pixel; a detection whose score sits right at the
+threshold can occasionally flip, because sharp's and torchvision's resamplers
+differ by rounding.
+
 ### Full pipeline
 
 ```js
@@ -230,6 +318,11 @@ Each result:
 ```
 
 The pipeline resizes each line crop to the recognizer's expected height, so the `chars` `x0`/`x1` coordinates are relative to the **crop**, not the full page.
+
+A D-FINE model that detects lines can be used as the pipeline's segmenter. Its line
+boxes already cover the whole line, so they are cropped as they are
+(`expandUp`/`expandDown` do not apply) and `polygon` is the detected box. A
+region-only layout model gives the pipeline no lines to recognize.
 
 Pipeline options (passed as the third argument to `KrakenPipeline.create`):
 
@@ -311,15 +404,15 @@ const pipeline = await KrakenPipeline.create(segPath, recPath, {
 
 ## Preprocessing
 
-All models share the same normalization: pixels are divided by 255 then inverted (`value = 1 − pixel/255`), matching Kraken's `tensor_invert` transform.
+Kraken's VGSL and PP-OCR models share the same normalization: pixels are divided by 255 then inverted (`value = 1 − pixel/255`), matching Kraken's `tensor_invert` transform. D-FINE models are the exception: they take plain `pixel/255`.
 
-| Step | Recognition | Segmentation |
-|------|------------|--------------|
-| Color mode | grayscale (L) or RGB per `channels` (PP-OCRv6: always RGB) | RGB (3-channel) |
-| Resize | height = model `height`, proportional width | height = model `height`, proportional width |
-| Padding | `pad` px white on each side | none |
-| Normalize | `1 − x/255` | `1 − x/255` |
-| Layout | CHW Float32 | CHW Float32 |
+| Step | Recognition | Segmentation | D-FINE |
+|------|------------|--------------|--------|
+| Color mode | grayscale (L) or RGB per `channels` (PP-OCRv6: always RGB) | RGB (3-channel) | RGB |
+| Resize | height = model `height`, proportional width | height = model `height`, proportional width | exactly `image_size`, bilinear |
+| Padding | `pad` px white on each side | none | none |
+| Normalize | `1 − x/255` | `1 − x/255` | `x/255` (**not** inverted) |
+| Layout | CHW Float32 | CHW Float32 | CHW Float32 |
 
 ## Known limitations
 
@@ -351,13 +444,21 @@ until you build it (needs the Kraken venv described above):
 npm run fixtures:ppocr   # downloads the model from Zenodo and exports it
 ```
 
+The D-FINE tests use `tests/fixtures/dfine.js_mlmodel`, the LADaS nano layout
+model (~14 MB), exported with:
+
+```bash
+env/bin/python3 export_kraken_onnx.py ladas_n.safetensors tests/fixtures/dfine.js_mlmodel
+```
+
 ## Project layout
 
 ```
 src/
-  index.js        public exports (KrakenRecognizer, KrakenSegmenter, KrakenPipeline)
+  index.js        public exports (KrakenRecognizer, KrakenSegmenter, KrakenPipeline, DFineSegmenter)
   recognizer.js   KrakenRecognizer — line image → text
   segmenter.js    KrakenSegmenter  — page image → oriented bounding boxes
+  dfine.js        DFineSegmenter   — page image → line and region boxes (D-FINE)
   pipeline.js     KrakenPipeline   — segment + deskew + recognize
   preprocess.js   image → Float32Array (sharp)
   decode.js       greedy CTC decoder + codec lookup
@@ -368,6 +469,7 @@ tests/
   recognizer.test.js
   segmenter.test.js
   pipeline.test.js
+  dfine.test.js
   preprocess.test.js
   decode.test.js
   loader.test.js
@@ -379,6 +481,7 @@ tests/
     fullpage.png                full manuscript page (2479×3508)
     double_page.png             landscape double-page spread (1722×1435)
     example.txt                 ground-truth transcription of fullpage.png
+    dfine.js_mlmodel            D-FINE layout model (LADaS nano)
     *.xml                       ALTO XML ground-truth segmentation
 
 docs/

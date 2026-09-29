@@ -143,4 +143,35 @@ async function preprocessPageImage(image, meta) {
   return { data: floatData, width: info.width, height: info.height, actualChannels: info.channels };
 }
 
-module.exports = { preprocessImage, preprocessPageImage, buildBatch, toChw };
+/**
+ * Preprocess a full-page image for a D-FINE detection model.
+ *
+ * Matches dfine-kraken's inference transforms: RGB, resized to exactly
+ * `image_size` (aspect ratio NOT preserved; torchvision bilinear with antialias,
+ * approximated by sharp's linear kernel), scaled to [0, 1]. Unlike the VGSL
+ * models, pixels are NOT inverted.
+ *
+ * @param {string|Buffer} image  Path or raw Buffer
+ * @param {object}        meta   {image_size: [height, width]}
+ * @returns {Promise<{data: Float32Array, width: number, height: number}>}  CHW data
+ */
+async function preprocessDetectionImage(image, meta) {
+  const [height, width] = meta.image_size;
+  const { data: buf } = await sharp(image, { failOn: 'none' })
+    .toColorspace('srgb')
+    .removeAlpha()
+    .resize({ width, height, fit: 'fill', kernel: 'linear' })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const plane = width * height;
+  const out = new Float32Array(3 * plane);
+  for (let i = 0; i < plane; i++) {
+    out[i]             = buf[i * 3]     / 255;
+    out[plane + i]     = buf[i * 3 + 1] / 255;
+    out[2 * plane + i] = buf[i * 3 + 2] / 255;
+  }
+  return { data: out, width, height };
+}
+
+module.exports = { preprocessImage, preprocessPageImage, preprocessDetectionImage, buildBatch, toChw };

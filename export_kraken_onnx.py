@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Export a Kraken .mlmodel or .safetensors model to .js_mlmodel.
+Export a Kraken .mlmodel, .safetensors or .ckpt model to .js_mlmodel.
 
 A .js_mlmodel is a ZIP archive containing:
-  model.onnx     — ONNX graph with dynamic batch and width axes
+  model.onnx     — ONNX graph (dynamic batch/width axes for VGSL and PP-OCR;
+                   D-FINE graphs take one fixed-size image)
   metadata.json  — model-type-specific config (codec, class_mapping, etc.)
 
-Supports VGSL recognition, VGSL segmentation, and PP-OCRv6 recognition models.
+Supports VGSL recognition, VGSL segmentation, PP-OCRv6 recognition and D-FINE
+segmentation (layout detection) models. D-FINE models need the dfine_kraken
+package. Training checkpoints (.ckpt) are converted to weights on the fly.
 
 Usage:
     env/bin/python3 export_kraken_onnx.py <model_path> [output_path]
@@ -33,6 +36,8 @@ import torch.nn.functional as F
 # the mean stays tight; the feed-forward PP-OCR graph is held to a tight max.
 _VGSL_TOL = {'max': 5e-2, 'mean': 1e-3}
 _PPOCR_TOL = {'max': 1e-3, 'mean': 1e-4}
+# D-FINE is checked on sigmoid scores and normalized boxes, both in [0, 1].
+_DFINE_TOL = {'max': 1e-3, 'mean': 1e-4}
 
 
 class _RecognitionExportWrapper(nn.Module):
@@ -300,6 +305,81 @@ def _unpatched_ref(inner_nn, backbone, orig_forward):
     return ref
 
 
+class _DFINEExportWrapper(nn.Module):
+    """Returns sigmoid class scores and normalized cxcywh boxes for D-FINE detectors."""
+    def __init__(self, inner_nn):
+        super().__init__()
+        self.inner_nn = inner_nn
+
+    def forward(self, x: torch.Tensor):
+        out = self.inner_nn(x)
+        # scores: (1, Q, num_classes), boxes: (1, Q, 4) as (cx, cy, w, h) in [0, 1]
+        return torch.sigmoid(out['pred_logits']), out['pred_boxes']
+
+
+def _export_dfine(model, model_path, output_path):
+    height, width = model.user_metadata['image_size']
+    variant = model.user_metadata['model_variant']
+    class_mapping = model.user_metadata['class_mapping']
+    num_top_queries = model.user_metadata['num_top_queries']
+    n_lines = len(class_mapping.get('lines', {}))
+    n_regions = len(class_mapping.get('regions', {}))
+
+    print(f'  Type : segmentation (D-FINE)')
+    print(f'  Variant: {variant}, classes={model.num_classes} '
+          f'({n_lines} line, {n_regions} region types)')
+    print(f'  Input: channels=3, size={width}x{height}')
+
+    wrapper = _DFINEExportWrapper(model)
+    wrapper.eval()
+    # The graph is traced at batch 1 and only valid at batch 1: the decoder
+    # repeats its precomputed anchors only when ``memory.shape[0] > 1``, a branch
+    # the tracer resolves at export time. The input size is fixed too — the
+    # encoder positional embeddings and decoder anchors are built for
+    # ``image_size`` — so no axis is dynamic.
+    dummy_inputs = (torch.zeros(1, 3, height, width),)
+
+    metadata = {
+        'model_type': 'segmentation',
+        'architecture': 'dfine',
+        'variant': variant,
+        'image_size': [height, width],
+        'channels': 3,
+        'num_classes': model.num_classes,
+        'num_top_queries': num_top_queries,
+        'class_mapping': class_mapping,
+    }
+    spec = {
+        'wrapper': wrapper,
+        'dummy_inputs': dummy_inputs,
+        'input_names': ['input'],
+        'output_names': ['scores', 'boxes'],
+        'dynamic_axes': None,
+        'metadata': metadata,
+        'check_shapes': [(1, 3, height, width)],
+        'tol': _DFINE_TOL,
+        'align': _align_queries,
+    }
+    return spec
+
+
+def _align_queries(refs, gots):
+    """
+    Reorder the ONNX queries to match the torch ones before comparing.
+
+    The decoder picks its queries with a top-k over encoder scores, and on the
+    random-noise check input neighbouring candidates can tie to within float
+    noise, so the two runtimes may emit the same detections in a different
+    order. Query order carries no meaning, so each torch query is matched to the
+    nearest ONNX query (over scores and box together); a real divergence still
+    shows up as a large distance.
+    """
+    ref_rows = torch.cat(refs, dim=-1)[0]
+    got_rows = torch.cat(gots, dim=-1)[0]
+    nearest = torch.cdist(ref_rows, got_rows, p=float('inf')).argmin(dim=1)
+    return [g[:, nearest] for g in gots]
+
+
 def _make_check_inputs(spec, shape):
     """Build a (torch args, ORT feeds) pair for one parity-check shape."""
     n, c, h, w = shape
@@ -336,21 +416,54 @@ def _parity_check(spec, onnx_path):
         ref_fn = spec.get('ref_fn', spec['wrapper'])
         with torch.no_grad():
             ref = ref_fn(*args)
-        ref = ref[0] if isinstance(ref, tuple) else ref
-        got = sess.run([spec['output_names'][0]], feeds)[0]
-        if tuple(got.shape) != tuple(ref.shape):
-            print(f'  ✗ {shape}: shape mismatch torch={tuple(ref.shape)} onnx={tuple(got.shape)}')
-            ok = False
-            continue
-        delta = (torch.from_numpy(got) - ref).abs()
-        dmax, dmean = float(delta.max()), float(delta.mean())
-        passed = dmax <= tol['max'] and dmean <= tol['mean']
-        status = '✓' if passed else '✗'
-        print(f'  {status} {shape}: max |Δ| = {dmax:.3e}, mean |Δ| = {dmean:.3e} '
-              f'(tol {tol["max"]:.0e}/{tol["mean"]:.0e})')
-        if not passed:
-            ok = False
+        # compare every float output the reference returns (PP-OCR's reference
+        # returns only the logits; its out_lens are integers derived from them)
+        refs = ref if isinstance(ref, tuple) else (ref,)
+        if spec.get('ref_fn') is not None:
+            refs = refs[:1]
+        names = spec['output_names'][:len(refs)]
+        gots = sess.run(names, feeds)
+        align = spec.get('align')
+        if align is not None:
+            gots = align(refs, [torch.from_numpy(g) for g in gots])
+        for name, ref, got in zip(names, refs, gots):
+            label = f'{shape} {name}' if len(names) > 1 else f'{shape}'
+            got = torch.as_tensor(got)
+            if tuple(got.shape) != tuple(ref.shape):
+                print(f'  ✗ {label}: shape mismatch torch={tuple(ref.shape)} onnx={tuple(got.shape)}')
+                ok = False
+                continue
+            delta = (got - ref).abs()
+            dmax, dmean = float(delta.max()), float(delta.mean())
+            passed = dmax <= tol['max'] and dmean <= tol['mean']
+            status = '✓' if passed else '✗'
+            print(f'  {status} {label}: max |Δ| = {dmax:.3e}, mean |Δ| = {dmean:.3e} '
+                  f'(tol {tol["max"]:.0e}/{tol["mean"]:.0e})')
+            if not passed:
+                ok = False
     return ok
+
+
+def _convert_checkpoint(ckpt_path, weights_path):
+    """
+    Convert a training checkpoint to safetensors, as ``ketos convert`` does.
+
+    ``ketos convert`` finds a checkpoint's lightning module through its
+    ``_config_class`` attribute, which dfine_kraken (<= 0.4.3) does not declare,
+    so D-FINE checkpoints fail with "No registered lightning module matches the
+    configuration class". Declaring it here lets kraken's converter handle them.
+    """
+    from kraken.models.convert import convert_models
+    try:
+        from dfine.model import DFINESegmentationModel
+        from dfine.configs import DFINESegmentationTrainingConfig
+        if not hasattr(DFINESegmentationModel, '_config_class'):
+            DFINESegmentationModel._config_class = DFINESegmentationTrainingConfig
+    except ImportError:
+        pass
+    print(f'  Converting checkpoint to weights …')
+    convert_models([str(ckpt_path)], str(weights_path))
+    return weights_path
 
 
 def export(model_path: str, output_path: str | None = None, check: bool = True) -> Path:
@@ -363,10 +476,14 @@ def export(model_path: str, output_path: str | None = None, check: bool = True) 
         output_path = Path(output_path)
 
     print(f'Loading {model_path} …')
-    # Try recognition first, then segmentation
-    models = load_models(str(model_path), tasks=['recognition'])
-    if not models:
-        models = load_models(str(model_path), tasks=['segmentation'])
+    with tempfile.TemporaryDirectory() as tmp:
+        weights_path = model_path
+        if model_path.suffix == '.ckpt':
+            weights_path = _convert_checkpoint(model_path, Path(tmp) / 'model.safetensors')
+        # Try recognition first, then segmentation
+        models = load_models(str(weights_path), tasks=['recognition'])
+        if not models:
+            models = load_models(str(weights_path), tasks=['segmentation'])
     if not models:
         raise ValueError(f'No supported model found in {model_path}')
     model = models[0]
@@ -378,6 +495,8 @@ def export(model_path: str, output_path: str | None = None, check: bool = True) 
 
     if model.__class__.__name__ == 'PPOCRv6Model':
         spec = _export_ppocr(model, model_path, output_path)
+    elif model.__class__.__name__ == 'DFINEModel':
+        spec = _export_dfine(model, model_path, output_path)
     elif 'segmentation' in model_types:
         spec = _export_segmentation(model, model_path, output_path)
     else:
@@ -420,7 +539,7 @@ def export(model_path: str, output_path: str | None = None, check: bool = True) 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('model', help='Path to .mlmodel or .safetensors')
+    p.add_argument('model', help='Path to .mlmodel, .safetensors or training .ckpt')
     p.add_argument('output', nargs='?', help='Output .js_mlmodel path (default: same name)')
     p.add_argument('--no-check', dest='check', action='store_false',
                    help='Skip the torch/onnxruntime parity check after export')

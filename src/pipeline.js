@@ -66,7 +66,9 @@ class KrakenPipeline {
    * }>>}
    *
    * Results are in reading order. `chars` `x0`/`x1` are relative to the line crop,
-   * not the full page image. `polygon` is the expanded above/below-baseline
+   * not the full page image. With a D-FINE segmenter the crop is the detected line
+   * box itself (`expandUp`/`expandDown` do not apply), `polygon` is that box, and a
+   * model that detects only regions yields no lines. `polygon` is the expanded above/below-baseline
    * quadrilateral (image-space, 4 [x, y] corners, same convention as `obb.corners`)
    * actually used to build the crop that was recognized — callers that need line
    * geometry for display or persistence should use this instead of re-deriving it
@@ -78,16 +80,22 @@ class KrakenPipeline {
     const { lines, imageSize } = await this._segmenter.segment(imageBuffer);
     if (lines.length === 0) return [];
 
-    // The model predicts thin baselines (~1–2px in heatmap space), so obb.h is
-    // meaningless as a line height. Estimate from median inter-baseline spacing.
-    const lineHeight = estimateLineHeight(lines, imageSize);
-    const topline = this._segmenter._meta.topline || false;
+    let crops;
+    if (lines[0].bbox) {
+      // D-FINE lines are boxes around the whole line: crop them as they are.
+      crops = await Promise.all(lines.map(line => extractBoxCrop(imageBuffer, line, imageSize)));
+    } else {
+      // The model predicts thin baselines (~1–2px in heatmap space), so obb.h is
+      // meaningless as a line height. Estimate from median inter-baseline spacing.
+      const lineHeight = estimateLineHeight(lines, imageSize);
+      const topline = this._segmenter._meta.topline || false;
 
-    const crops = await Promise.all(
-      lines.map(({ obb }) =>
-        extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline, this._opts)
-      )
-    );
+      crops = await Promise.all(
+        lines.map(({ obb }) =>
+          extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline, this._opts)
+        )
+      );
+    }
 
     const recognized = await Promise.all(crops.map(({ buffer }) => this._recognizer.recognize(buffer)));
 
@@ -121,6 +129,25 @@ function estimateLineHeight(lines, imageSize) {
   if (gaps.length === 0) return Math.round(imageSize.height / 30);
   gaps.sort((a, b) => a - b);
   return gaps[Math.floor(gaps.length / 2)];
+}
+
+/**
+ * Crop an axis-aligned D-FINE line box (already clamped to the image).
+ *
+ * @returns {Promise<{ buffer: Buffer, polygon: Array<[number, number]> }>}
+ */
+async function extractBoxCrop(imageBuffer, { bbox, polygon }, { width, height }) {
+  const left = Math.min(width - 1, Math.floor(bbox[0]));
+  const top  = Math.min(height - 1, Math.floor(bbox[1]));
+  const buffer = await sharp(imageBuffer)
+    .extract({
+      left,
+      top,
+      width:  Math.max(1, Math.min(width, Math.ceil(bbox[2])) - left),
+      height: Math.max(1, Math.min(height, Math.ceil(bbox[3])) - top),
+    })
+    .toBuffer();
+  return { buffer, polygon };
 }
 
 /**
