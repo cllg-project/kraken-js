@@ -18,6 +18,8 @@ import {
 
 import { buildL2C, greedyCTC, decodeCodec } from '../src/decode.js';
 
+import { selectDetections, invertMapping, toRegion } from '../src/detections.js';
+
 // ort is loaded as a UMD global via <script> tag in index.html.
 /* global ort */
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
@@ -30,9 +32,29 @@ ort.env.wasm.proxy = true;
 // Multi-threaded WASM only exists on a cross-origin isolated page (COOP/COEP).
 // serve-demo.js sends those headers; GitHub Pages cannot, and there ORT stays
 // single-threaded — slower, but off the main thread either way.
-if (globalThis.crossOriginIsolated) {
-  ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);
+export const DEFAULT_THREADS = 4;
+
+/** Whether this page can run ONNX Runtime with more than one thread. */
+export const threadsAvailable = Boolean(globalThis.crossOriginIsolated);
+
+/** Most threads worth offering: every logical core the browser reports. */
+export const maxThreads = navigator.hardwareConcurrency || 1;
+
+// ORT reads numThreads once, when it initialises WASM for the first session;
+// later changes are ignored until the page reloads.
+let _wasmInitialised = false;
+
+/**
+ * Set the number of inference threads. Returns false once a model is loaded,
+ * since the value can then only take effect after a reload.
+ */
+export function setThreads(n) {
+  if (_wasmInitialised) return false;
+  ort.env.wasm.numThreads = threadsAvailable ? Math.max(1, Math.min(n, maxThreads)) : 1;
+  return true;
 }
+
+setThreads(DEFAULT_THREADS);
 
 // ---------------------------------------------------------------------------
 // .js_mlmodel loader (uses JSZip global)
@@ -127,6 +149,7 @@ async function readBodyWithProgress(resp, onProgress) {
  * down; running on the main thread is slow and blocking, but it works.
  */
 async function createSession(onnxBuf) {
+  _wasmInitialised = true;
   try {
     return await ort.InferenceSession.create(onnxBuf, { executionProviders: ['wasm'] });
   } catch (err) {
@@ -337,6 +360,88 @@ class BrowserSegmenter {
 }
 
 // ---------------------------------------------------------------------------
+// BrowserZoneDetector — D-FINE layout regions (mirrors src/dfine.js)
+// ---------------------------------------------------------------------------
+
+/**
+ * Preprocess a page for D-FINE: stretch to the model's fixed input size and
+ * scale to 0..1, without inversion (mirrors preprocessDetectionImage).
+ */
+function preprocessDetectionCanvas(img, meta) {
+  const [H, W] = meta.image_size;
+  const c = document.createElement('canvas');
+  c.width  = W;
+  c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, W, H);
+  const raw = ctx.getImageData(0, 0, W, H).data;
+
+  const plane = H * W;
+  const chw = new Float32Array(3 * plane);
+  for (let i = 0; i < plane; i++) {
+    chw[i            ] = raw[i * 4    ] / 255;
+    chw[i + plane    ] = raw[i * 4 + 1] / 255;
+    chw[i + 2 * plane] = raw[i * 4 + 2] / 255;
+  }
+  return { data: chw, width: W, height: H };
+}
+
+class BrowserZoneDetector {
+  constructor(session, meta, opts = {}) {
+    this._session        = session;
+    this._meta           = meta;
+    this._scoreThreshold = opts.scoreThreshold ?? 0.5;
+    this._regionMap      = invertMapping(meta.class_mapping?.regions);
+  }
+
+  static async create(url, opts = {}) {
+    const { session, meta } = await loadJsMlmodel(url, { onProgress: opts.onProgress });
+    if (meta.architecture !== 'dfine') {
+      throw new Error(`zone model is not a D-FINE model (architecture: ${meta.architecture})`);
+    }
+    return new BrowserZoneDetector(session, meta, opts);
+  }
+
+  /** Detect layout regions; returns [{ bbox, polygon, type, score }], top-to-bottom. */
+  async detect(imgEl) {
+    const origW = imgEl.naturalWidth  ?? imgEl.width;
+    const origH = imgEl.naturalHeight ?? imgEl.height;
+
+    const { data, width, height } = preprocessDetectionCanvas(imgEl, this._meta);
+    const input = new ort.Tensor('float32', data, [1, 3, height, width]);
+    const { scores, boxes } = await this._session.run({ input });
+
+    const detections = selectDetections(scores.data, boxes.data, scores.dims[1], scores.dims[2], {
+      topK: this._meta.num_top_queries ?? 300,
+      scoreThreshold: this._scoreThreshold,
+      width: origW,
+      height: origH,
+    });
+
+    const zones = detections
+      .filter(det => this._regionMap.has(det.label))
+      .map(det => toRegion(det, this._regionMap.get(det.label)));
+    zones.sort((a, b) => a.bbox[1] - b.bbox[1] || a.bbox[0] - b.bbox[0]);
+    return zones;
+  }
+}
+
+/** Index of the smallest zone containing (x, y), or -1. */
+function zoneAt(zones, x, y) {
+  let best = -1, bestArea = Infinity;
+  zones.forEach(({ bbox: [x0, y0, x1, y1] }, i) => {
+    const area = (x1 - x0) * (y1 - y0);
+    if (x > x0 && x < x1 && y > y0 && y < y1 && area < bestArea) {
+      best = i;
+      bestArea = area;
+    }
+  });
+  return best;
+}
+
+// ---------------------------------------------------------------------------
 // BrowserRecognizer
 // ---------------------------------------------------------------------------
 
@@ -483,11 +588,18 @@ function loadReporter(name, url, onStatus) {
  * @param {HTMLImageElement} imgEl
  * @param {string}           segUrl   URL of segmentation .js_mlmodel
  * @param {string}           recUrl   URL of recognition .js_mlmodel
- * @param {{ onStatus?: (msg:string)=>void, onLine?: (line:object)=>void }} opts
+ * @param {{ onStatus?: (msg:string)=>void, onLine?: (line:object)=>void,
+ *           zoneUrl?: string, onZones?: (zones:object[])=>void }} opts
+ *        zoneUrl: D-FINE .js_mlmodel for layout zones; each line then carries
+ *        `zone`, the index of the smallest zone containing its centre (or -1).
  */
 export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
-  const { onStatus = () => {}, onLine = () => {}, noColumnSplit = false,
-          expandUp, expandDown } = opts;
+  const { onStatus = () => {}, onLine = () => {}, onZones = () => {},
+          noColumnSplit = false, zoneUrl, expandUp, expandDown } = opts;
+
+  const zoneDetector = zoneUrl && await BrowserZoneDetector.create(zoneUrl, {
+    onProgress: loadReporter('zone', zoneUrl, onStatus),
+  });
 
   const segmenter = await BrowserSegmenter.create(segUrl, {
     noColumnSplit,
@@ -497,6 +609,13 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
   const recognizer = await BrowserRecognizer.create(recUrl, {
     onProgress: loadReporter('recognition', recUrl, onStatus),
   });
+
+  let zones = [];
+  if (zoneDetector) {
+    onStatus('Detecting zones…');
+    zones = await zoneDetector.detect(imgEl);
+    onZones(zones);
+  }
 
   onStatus('Segmenting page…');
   const { lines, imageSize } = await segmenter.segment(imgEl);
@@ -526,7 +645,8 @@ export async function runPipeline(imgEl, segUrl, recUrl, opts = {}) {
     const cropBounds = { ...extractLineCropCanvas._lastBounds };
 
     const { text, chars } = await recognizer.recognize(cropCanvas);
-    const result = { obb, type, text, chars, cropBounds };
+    const zone = zoneAt(zones, obb.cx, obb.cy);
+    const result = { obb, type, text, chars, cropBounds, zone };
     results.push(result);
     onLine(result);
   }

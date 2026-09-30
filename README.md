@@ -504,6 +504,8 @@ Two recognition models are available via the model selector:
 
 The segmentation model is shared across both. A **Toggle overlay** button draws the oriented crop polygons (the exact regions sent to the recognizer) over the page image. Double-page spreads are split into columns automatically; a checkbox disables this if needed.
 
+Layout zones are detected with the LADaS D-FINE model (nano variant), on by default and switchable with a checkbox. Zones are drawn on the overlay with their class, and each transcribed line is tagged with the smallest zone containing it.
+
 ### Keeping the page responsive
 
 Inference is heavy enough to freeze a page if it runs on the main thread — a full-page
@@ -519,7 +521,9 @@ segmentation pass is seconds of uninterruptible work. The demo avoids that:
 `npm run demo` additionally serves `Cross-Origin-Opener-Policy` / `Cross-Origin-Embedder-Policy`,
 which is what lets ONNX Runtime use multi-threaded WASM (6 s vs 17 s for the sample page).
 GitHub Pages cannot send those headers, so the deployed demo is single-threaded — slower,
-but still off the main thread and responsive. Because those headers apply locally, the
+but still off the main thread and responsive. When multi-threading is available, a **Threads** selector
+sets how many threads ONNX Runtime uses (default 4, remembered across visits). ONNX Runtime
+fixes the count when the first model loads, so a change made after a run applies on reload. Because those headers apply locally, the
 jsdelivr `<script>` tags in `docs/index.html` must carry `crossorigin="anonymous"`.
 
 ## Acknowledgements

@@ -29,6 +29,7 @@ jobs:
           mkdir -p docs/models
           cp tests/fixtures/segmentation.js_mlmodel docs/models/
           cp tests/fixtures/model_best.js_mlmodel   docs/models/
+          cp tests/fixtures/dfine.js_mlmodel        docs/models/
           cp tests/fixtures/fullpage.png             docs/models/
 
       - name: Set up Python

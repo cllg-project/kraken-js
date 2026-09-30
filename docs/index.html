@@ -159,6 +159,35 @@
       unicode-bidi: plaintext;
     }
 
+    .line-zone {
+      font-size: 0.65rem;
+      color: #2a5a7a;
+      background: #e4eef4;
+      border-radius: 3px;
+      padding: 0 0.35rem;
+      flex-shrink: 0;
+      font-family: sans-serif;
+    }
+
+    .option-row {
+      font-size: 0.8rem;
+      color: #7a6a50;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      user-select: none;
+    }
+    .option-row select {
+      font-size: 0.8rem;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      border: 1px solid #c8b89a;
+      background: #faf6f0;
+      color: #3a2a1a;
+      cursor: pointer;
+    }
+    .option-row .hint { font-style: italic; opacity: 0.8; }
+
     #transcription p.empty {
       color: #b0a090;
       font-style: italic;
@@ -282,12 +311,23 @@
         Disable multi-column detection
       </label>
 
-      <label style="font-size:0.8rem;color:#7a6a50;display:flex;align-items:center;gap:0.4rem;user-select:none;margin-top:0.4rem;">
+      <label class="option-row">
+        <input type="checkbox" id="detect-zones" checked />
+        Detect zones (LADaS layout model)
+      </label>
+
+      <label class="option-row" style="margin-top:0.4rem;">
         Recognition model:
-        <select id="model-select" style="font-size:0.8rem;padding:0.2rem 0.4rem;border-radius:4px;border:1px solid #c8b89a;background:#faf6f0;color:#3a2a1a;cursor:pointer;">
+        <select id="model-select">
           <option value="greek">Greek print (Antiqua Graeca)</option>
           <option value="latin">Latin script print (CATMuS)</option>
         </select>
+      </label>
+
+      <label class="option-row">
+        Threads:
+        <select id="threads-select"></select>
+        <span id="threads-hint" class="hint"></span>
       </label>
 
       <div id="status">Models not loaded.</div>
@@ -307,7 +347,8 @@
     OCR/HTR models by
     <a href="https://github.com/mittagessen" target="_blank" rel="noopener">Benjamin Kiessling</a>,
     running ONNX models in the browser via
-    <a href="https://onnxruntime.ai" target="_blank" rel="noopener">ONNX Runtime Web</a>.<br /><br />
+    <a href="https://onnxruntime.ai" target="_blank" rel="noopener">ONNX Runtime Web</a>.
+    Layout zones are detected with the LADaS D-FINE model (nano variant).<br /><br />
 
     <strong>Known limitations:</strong>
     Each model is script-specific; results on other scripts will be meaningless.
@@ -324,12 +365,15 @@
   </footer>
 
   <script type="module">
-    import { runPipeline } from './demo.bundle.js';
+    import {
+      runPipeline, setThreads, DEFAULT_THREADS, maxThreads, threadsAvailable,
+    } from './demo.bundle.js';
 
     // demo.js and ort are now ready — dismiss the loading screen
     document.getElementById('page-loader').classList.add('hidden');
 
-    const SEG_URL = './models/segmentation.js_mlmodel';
+    const SEG_URL  = './models/segmentation.js_mlmodel';
+    const ZONE_URL = './models/dfine.js_mlmodel'; // LADaS (D-FINE nano)
 
     const MODELS = {
       greek: {
@@ -353,6 +397,41 @@
     applyModelNotice();
     modelSelect.addEventListener('change', applyModelNotice);
 
+    // Thread count. ORT fixes it when the first model loads, so a change made
+    // afterwards is remembered and applied on the next page load.
+    const THREADS_KEY    = 'kraken-js-demo-threads';
+    const threadsSelect  = document.getElementById('threads-select');
+    const threadsHint    = document.getElementById('threads-hint');
+
+    function readStoredThreads() {
+      try { return Number(localStorage.getItem(THREADS_KEY)) || null; } catch { return null; }
+    }
+
+    if (threadsAvailable) {
+      const choices = [...new Set([1, 2, 4, 8, 16, maxThreads])]
+        .filter(n => n <= maxThreads)
+        .sort((a, b) => a - b);
+      for (const n of choices) threadsSelect.add(new Option(String(n), String(n)));
+      const initial = Math.min(readStoredThreads() ?? DEFAULT_THREADS, maxThreads);
+      threadsSelect.value = String(choices.includes(initial) ? initial : choices[choices.length - 1]);
+      setThreads(Number(threadsSelect.value));
+      threadsHint.textContent = `of ${maxThreads} available`;
+    } else {
+      threadsSelect.add(new Option('1', '1'));
+      threadsSelect.disabled = true;
+      threadsHint.textContent = 'multi-threading needs a cross-origin isolated page';
+    }
+
+    threadsSelect.addEventListener('change', () => {
+      const n = Number(threadsSelect.value);
+      try { localStorage.setItem(THREADS_KEY, String(n)); } catch {}
+      threadsHint.textContent = setThreads(n)
+        ? `of ${maxThreads} available`
+        : 'reload the page to apply';
+    });
+
+    const detectZonesCb = document.getElementById('detect-zones');
+
     const canvas    = document.getElementById('page-canvas');
     const placeholder = document.getElementById('canvas-placeholder');
     const btnSample = document.getElementById('btn-sample');
@@ -366,6 +445,7 @@
     const ctx = canvas.getContext('2d');
     let currentImg = null;
     let overlayLines = null;
+    let overlayZones = [];
     let showOverlay = false;
 
     function setStatus(msg, isError = false) {
@@ -382,6 +462,7 @@
       placeholder.style.display = 'none';
       btnRun.disabled = false;
       overlayLines = null;
+      overlayZones = [];
       showOverlay = false;
       overlayBtn.disabled = true;
     }
@@ -394,6 +475,24 @@
       // Scale line width so it's ~2px on screen regardless of canvas zoom
       const displayScale = canvas.offsetWidth / canvas.width;
       const lw = Math.max(1, Math.round(1.5 / displayScale));
+
+      // Zones first, so line boxes stay visible on top of them
+      ctx.lineWidth = lw;
+      ctx.font      = `${Math.round(12 / displayScale)}px sans-serif`;
+      ctx.textBaseline = 'top';
+      for (const { bbox: [x0, y0, x1, y1], type } of overlayZones) {
+        ctx.strokeStyle = 'rgba(30, 100, 160, 0.9)';
+        ctx.fillStyle   = 'rgba(30, 100, 160, 0.06)';
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        const pad = Math.round(2 / displayScale);
+        const tw  = ctx.measureText(type).width;
+        ctx.fillStyle = 'rgba(30, 100, 160, 0.85)';
+        ctx.fillRect(x0, y0, tw + 2 * pad, Math.round(14 / displayScale));
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(type, x0 + pad, y0 + pad / 2);
+      }
+
       ctx.strokeStyle = 'rgba(220, 60, 30, 0.85)';
       ctx.fillStyle   = 'rgba(220, 60, 30, 0.08)';
       ctx.lineWidth   = lw;
@@ -500,6 +599,7 @@
       btnSample.disabled = true;
       transEl.innerHTML = '';
       overlayLines = [];
+      overlayZones = [];
       showOverlay = false;
       overlayBtn.disabled = true;
 
@@ -513,20 +613,25 @@
         let lineCount = 0;
         await runPipeline(currentImg, SEG_URL, MODELS[modelSelect.value].recUrl, {
           noColumnSplit: noColumnSplitCb.checked,
+          zoneUrl: detectZonesCb.checked ? ZONE_URL : undefined,
           onStatus: msg => setStatus(msg),
-          onLine: ({ obb, type, text, cropBounds }) => {
+          onZones: zones => { overlayZones = zones; },
+          onLine: ({ obb, type, text, cropBounds, zone }) => {
             overlayLines.push({ obb, type, cropBounds });
             lineCount++;
+            const zoneTag = zone >= 0
+              ? `<span class="line-zone">${escHtml(overlayZones[zone].type)}</span>`
+              : '';
             // Replace the trailing placeholder with the real line
             if (activePlaceholder && activePlaceholder.parentNode) {
               const div = document.createElement('div');
               div.className = 'line-result';
-              div.innerHTML = `<span class="line-num">${lineCount}</span><span class="line-text">${escHtml(text)}</span>`;
+              div.innerHTML = `<span class="line-num">${lineCount}</span><span class="line-text">${escHtml(text)}</span>${zoneTag}`;
               transEl.replaceChild(div, activePlaceholder);
             } else {
               const div = document.createElement('div');
               div.className = 'line-result';
-              div.innerHTML = `<span class="line-num">${lineCount}</span><span class="line-text">${escHtml(text)}</span>`;
+              div.innerHTML = `<span class="line-num">${lineCount}</span><span class="line-text">${escHtml(text)}</span>${zoneTag}`;
               transEl.appendChild(div);
             }
             // Add a new trailing placeholder for the next line
@@ -539,7 +644,10 @@
         transEl.querySelectorAll('.line-placeholder').forEach(el => el.remove());
         activePlaceholder = null;
         overlayBtn.disabled = false;
-        setStatus(`Done — ${lineCount} line${lineCount !== 1 ? 's' : ''} recognized.`);
+        const zoneNote = detectZonesCb.checked
+          ? `, ${overlayZones.length} zone${overlayZones.length !== 1 ? 's' : ''}`
+          : '';
+        setStatus(`Done — ${lineCount} line${lineCount !== 1 ? 's' : ''} recognized${zoneNote}.`);
       } catch (e) {
         transEl.querySelectorAll('.line-placeholder').forEach(el => el.remove());
         activePlaceholder = null;
