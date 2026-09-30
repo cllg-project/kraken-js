@@ -80,20 +80,23 @@ class KrakenPipeline {
     const { lines, imageSize } = await this._segmenter.segment(imageBuffer);
     if (lines.length === 0) return [];
 
+    // Decode the page once and cut every crop from the decoded pixels. Cropping from
+    // the encoded image made each line decode the whole page again, all lines at once:
+    // on a large page (6000 px, 40+ lines) that is several GB in flight.
+    const page = await decodePage(imageBuffer);
+
     let crops;
     if (lines[0].bbox) {
       // D-FINE lines are boxes around the whole line: crop them as they are.
-      crops = await Promise.all(lines.map(line => extractBoxCrop(imageBuffer, line, imageSize)));
+      crops = await mapLimit(lines, CROP_CONCURRENCY, line => extractBoxCrop(page, line, imageSize));
     } else {
       // The model predicts thin baselines (~1–2px in heatmap space), so obb.h is
       // meaningless as a line height. Estimate from median inter-baseline spacing.
       const lineHeight = estimateLineHeight(lines, imageSize);
       const topline = this._segmenter._meta.topline || false;
 
-      crops = await Promise.all(
-        lines.map(({ obb }) =>
-          extractLineCrop(imageBuffer, obb, imageSize.width, imageSize.height, lineHeight, topline, this._opts)
-        )
+      crops = await mapLimit(lines, CROP_CONCURRENCY, ({ obb }) =>
+        extractLineCrop(page, obb, imageSize.width, imageSize.height, lineHeight, topline, this._opts)
       );
     }
 
@@ -107,6 +110,41 @@ class KrakenPipeline {
       chars: recognized[i].chars,
     }));
   }
+}
+
+// Line crops in flight at once. Each crop hands sharp its own view of the decoded page,
+// so this bounds memory at a few page copies whatever the number of lines.
+const CROP_CONCURRENCY = 4;
+
+/**
+ * Decode an encoded page image to raw pixels, as crop input for {@link openPage}.
+ *
+ * @returns {Promise<{ data: Buffer, info: { width: number, height: number, channels: number } }>}
+ */
+async function decodePage(imageBuffer) {
+  const { data, info } = await sharp(imageBuffer, { limitInputPixels: false })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { data, info: { width: info.width, height: info.height, channels: info.channels } };
+}
+
+/** A sharp pipeline over the decoded page. */
+function openPage({ data, info }) {
+  return sharp(data, { raw: info, limitInputPixels: false });
+}
+
+/** Map with at most `limit` promises pending at once; results keep input order. */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 /**
@@ -136,22 +174,23 @@ function estimateLineHeight(lines, imageSize) {
  *
  * @returns {Promise<{ buffer: Buffer, polygon: Array<[number, number]> }>}
  */
-async function extractBoxCrop(imageBuffer, { bbox, polygon }, { width, height }) {
+async function extractBoxCrop(page, { bbox, polygon }, { width, height }) {
   const left = Math.min(width - 1, Math.floor(bbox[0]));
   const top  = Math.min(height - 1, Math.floor(bbox[1]));
-  const buffer = await sharp(imageBuffer)
+  const buffer = await openPage(page)
     .extract({
       left,
       top,
       width:  Math.max(1, Math.min(width, Math.ceil(bbox[2])) - left),
       height: Math.max(1, Math.min(height, Math.ceil(bbox[3])) - top),
     })
+    .png()
     .toBuffer();
   return { buffer, polygon };
 }
 
 /**
- * Extract a deskewed line crop from a full-page image buffer.
+ * Extract a deskewed line crop from the decoded page.
  *
  * Strategy: orient the crop along the OBB angle, then straighten it.
  *   1. Compute the 4 corners of the desired crop in image space (OBB expanded
@@ -164,7 +203,7 @@ async function extractBoxCrop(imageBuffer, { bbox, polygon }, { width, height })
  *   `polygon` is the image-space quadrilateral computed in step 1 (TL, TR, BR, BL),
  *   returned so callers have the exact geometry that produced `buffer`.
  */
-async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topline, opts = {}) {
+async function extractLineCrop(page, obb, origW, origH, lineHeight, topline, opts = {}) {
   const { cx, cy, angle, w: obbW } = obb;
 
   const upRatio    = opts.expandUp   ?? (topline ? 0.35 : 0.85);
@@ -197,8 +236,9 @@ async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topli
   const preH = Math.max(1, preBottom - preTop);
 
   if (Math.abs(angleDeg) < 0.5) {
-    const buffer = await sharp(imageBuffer)
+    const buffer = await openPage(page)
       .extract({ left: preLeft, top: preTop, width: preW, height: preH })
+      .png()
       .toBuffer();
     return { buffer, polygon: rc };
   }
@@ -222,10 +262,11 @@ async function extractLineCrop(imageBuffer, obb, origW, origH, lineHeight, topli
   const fT = Math.max(0,       Math.round(newCy - expandUp));
   const fB = Math.min(rotH - 1, Math.round(newCy + expandDown));
 
-  const buffer = await sharp(imageBuffer)
+  const buffer = await openPage(page)
     .extract({ left: preLeft, top: preTop, width: preW, height: preH })
     .rotate(-angleDeg, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
     .extract({ left: fL, top: fT, width: Math.max(1, fR - fL), height: Math.max(1, fB - fT) })
+    .png()
     .toBuffer();
   return { buffer, polygon: rc };
 }
