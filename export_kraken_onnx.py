@@ -131,6 +131,14 @@ def _export_segmentation(model, model_path, output_path):
     one_channel_mode = model.user_metadata.get('one_channel_mode', None)
     vgsl = model.user_metadata.get('vgsl', '')
     class_mapping = model.user_metadata.get('class_mapping', {})
+    # A model trained with several line classes can carry two mappings. `class_mapping`
+    # is the one kraken writes sorted by class name, while `_full_class_mapping` keeps
+    # the training order, i.e. the real output channels. When they disagree (CLLG's
+    # combined model: every line comes out "ApparatusLine" with the first), use the latter.
+    full_mapping = model.user_metadata.get('_full_class_mapping')
+    if full_mapping and full_mapping != class_mapping:
+        print('  Note: class_mapping and _full_class_mapping differ; using _full_class_mapping')
+        class_mapping = full_mapping
     topline = model.user_metadata.get('topline', False)
 
     print(f'  Type : segmentation')
@@ -444,6 +452,62 @@ def _parity_check(spec, onnx_path):
     return ok
 
 
+class _ROMLPExportWrapper(nn.Module):
+    """Pair features (N, 2 * (classes + 6)) -> probability that the first element comes first."""
+    def __init__(self, inner_nn):
+        super().__init__()
+        self.inner_nn = inner_nn
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.inner_nn(x))
+
+
+def _export_romlp(model, model_path, output_path, check):
+    """
+    Export a reading-order MLP. The graph only scores element pairs; building the
+    features and decoding the order is done in JS (src/readingorder.js), mirroring
+    kraken.lib.segmentation.neural_reading_order.
+    """
+    class_mapping = model.class_mapping
+    print('  Type : reading order (ROMLP)')
+    print(f'  Features: {model.feature_size}, hidden: {model.hidden_size}, classes: {class_mapping}')
+    wrapper = _ROMLPExportWrapper(model)
+    wrapper.eval()
+    dummy = torch.rand(4, model.feature_size)
+    metadata = {
+        'model_type': 'reading_order',
+        'architecture': 'romlp',
+        'feature_size': model.feature_size,
+        'hidden_size': model.hidden_size,
+        'level': model.level,
+        'class_mapping': class_mapping,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        onnx_path = Path(tmp) / 'model.onnx'
+        torch.onnx.export(wrapper, (dummy,), str(onnx_path), input_names=['input'],
+                          output_names=['output'], dynamic_axes={'input': {0: 'pairs'}, 'output': {0: 'pairs'}},
+                          opset_version=17, dynamo=False)
+        if check:
+            import onnxruntime as ort
+            sess = ort.InferenceSession(str(onnx_path), providers=['CPUExecutionProvider'])
+            for n in (1, 9, 400):
+                x = torch.rand(n, model.feature_size)
+                with torch.no_grad():
+                    ref = wrapper(x)
+                got = torch.from_numpy(sess.run(['output'], {'input': x.numpy()})[0])
+                delta = float((got - ref).abs().max())
+                print(f'  {"✓" if delta < 1e-5 else "✗"} ({n}, {model.feature_size}): max |Δ| = {delta:.3e}')
+                if delta >= 1e-5:
+                    raise RuntimeError('ONNX parity check failed for the reading-order model.')
+        meta_path = Path(tmp) / 'metadata.json'
+        meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2))
+        with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(onnx_path, 'model.onnx')
+            zf.write(meta_path, 'metadata.json')
+    print(f'Done → {output_path}  ({output_path.stat().st_size // 1024} KB)')
+    return output_path
+
+
 def _convert_checkpoint(ckpt_path, weights_path):
     """
     Convert a training checkpoint to safetensors, as ``ketos convert`` does.
@@ -484,10 +548,14 @@ def export(model_path: str, output_path: str | None = None, check: bool = True) 
         models = load_models(str(weights_path), tasks=['recognition'])
         if not models:
             models = load_models(str(weights_path), tasks=['segmentation'])
+        if not models:
+            models = load_models(str(weights_path), tasks=['reading_order'])
     if not models:
         raise ValueError(f'No supported model found in {model_path}')
     model = models[0]
     model.eval()
+    if model.__class__.__name__ == 'ROMLP':
+        return _export_romlp(model, model_path, output_path, check)
 
     model_types = model.user_metadata.get('model_type', [])
     if isinstance(model_types, str):

@@ -451,6 +451,26 @@ model (~14 MB), exported with:
 env/bin/python3 export_kraken_onnx.py ladas_n.safetensors tests/fixtures/dfine.js_mlmodel
 ```
 
+### Reading order (ROMLP)
+
+Kraken's reading-order MLP (`reading_order` task) exports like any other model, and
+`KrakenPipeline` can use it instead of the top-to-bottom ordering:
+
+```bash
+env/bin/python3 split-kraken-bundle.py cllg-combined.safetensors parts/   # only for multi-model bundles
+env/bin/python3 export_kraken_onnx.py parts/reading_order-ROMLP.safetensors ro.js_mlmodel
+```
+
+```js
+const pipeline = await KrakenPipeline.create('seg.js_mlmodel', 'rec.js_mlmodel', { readingOrder: 'ro.js_mlmodel' });
+```
+
+The ONNX graph only scores pairs of lines; `src/readingorder.js` builds the pair features
+(line class, centre/start/end of the baseline) and decodes the order exactly as
+`kraken.lib.segmentation.neural_reading_order` does (`tests/readingorder.test.js` compares
+60 random pages against Kraken's own output). Line classes come from the segmentation model's
+`class_mapping`, so the segmenter must output the classes the reading-order model was trained on.
+
 ## Project layout
 
 ```

@@ -3,14 +3,16 @@ const fs = require('node:fs');
 const sharp = require('sharp');
 const { KrakenSegmenter } = require('./segmenter');
 const { KrakenRecognizer } = require('./recognizer');
+const { ReadingOrder } = require('./readingorder');
 
 /**
  * End-to-end OCR pipeline: segment a page image, deskew line crops, and recognize text.
  */
 class KrakenPipeline {
-  constructor(segmenter, recognizer, opts) {
+  constructor(segmenter, recognizer, opts, readingOrder = null) {
     this._segmenter = segmenter;
     this._recognizer = recognizer;
+    this._readingOrder = readingOrder;
     this._opts = opts;
   }
 
@@ -33,6 +35,9 @@ class KrakenPipeline {
    * @param {object}   [opts.segmenter={}]     Options forwarded to {@link KrakenSegmenter.create}
    *                                           (override `threads`/`allowSpinning` for it)
    * @param {object}   [opts.recognizer={}]    Options forwarded to {@link KrakenRecognizer.create}
+   * @param {string}   [opts.readingOrder]     Path to a reading-order `.js_mlmodel` (Kraken's ROMLP,
+   *                                           see {@link ReadingOrder}); when set, it replaces the
+   *                                           segmenter's top-to-bottom ordering of the lines
    * @returns {Promise<KrakenPipeline>}
    */
   static async create(segmenterPath, recognizerPath, opts = {}) {
@@ -46,11 +51,12 @@ class KrakenPipeline {
     const shared = {};
     if (opts.threads !== undefined) shared.threads = opts.threads;
     if (opts.allowSpinning !== undefined) shared.allowSpinning = opts.allowSpinning;
-    const [segmenter, recognizer] = await Promise.all([
+    const [segmenter, recognizer, readingOrder] = await Promise.all([
       KrakenSegmenter.create(segmenterPath, { ...shared, ...(opts.segmenter || {}) }),
       KrakenRecognizer.create(recognizerPath, { ...shared, ...(opts.recognizer || {}) }),
+      opts.readingOrder ? ReadingOrder.create(opts.readingOrder, shared) : null,
     ]);
-    return new KrakenPipeline(segmenter, recognizer, opts);
+    return new KrakenPipeline(segmenter, recognizer, opts, readingOrder);
   }
 
   /**
@@ -77,8 +83,14 @@ class KrakenPipeline {
   async process(image) {
     const imageBuffer = typeof image === 'string' ? fs.readFileSync(image) : image;
 
-    const { lines, imageSize } = await this._segmenter.segment(imageBuffer);
+    const segmented = await this._segmenter.segment(imageBuffer);
+    const { imageSize } = segmented;
+    let lines = segmented.lines;
     if (lines.length === 0) return [];
+    if (this._readingOrder) {
+      const order = await this._readingOrder.order(lines, imageSize);
+      lines = order.map(i => lines[i]);
+    }
 
     // Decode the page once and cut every crop from the decoded pixels. Cropping from
     // the encoded image made each line decode the whole page again, all lines at once:
