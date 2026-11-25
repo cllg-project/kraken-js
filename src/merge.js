@@ -88,7 +88,8 @@ const countChar = (s, c) => [...s].filter(k => k === c).length;
  * @param {Array<{ch,x,conf}>} nw
  * @param {Array<{ch,x,conf}>} spec
  * @param {object} [params]  overrides of DEFAULT_PARAMS
- * @returns {{ text: string, edits: object[], flags: Array<[string, number, number]> }}
+ * @returns {{ text: string, edits: object[], flags: Array<[string, number, number]>,
+ *   merged: Array<{ch, x, conf, src?}> }}  `merged` are the spikes of `text`, one per character
  */
 function merge(base, nw, spec, params = {}) {
   const P = { ...DEFAULT_PARAMS, ...params };
@@ -97,7 +98,7 @@ function merge(base, nw, spec, params = {}) {
   const nt = signTokens(nw, pt, P.signs);
   const st = signTokens(spec, pt, P.signs);
   const agreed = nt.filter(t => st.some(u => u.ch === t.ch && Math.abs(u.x - t.x) <= tol));
-  const chars = base.map(s => ({ ...s }));
+  const chars = base.map((s, i) => ({ ...s, src: i })); // `src`: index in `base`, absent for inserted signs
   const edits = [];
 
   for (const { ch: c, x, conf: cf } of agreed) {
@@ -168,7 +169,7 @@ function merge(base, nw, spec, params = {}) {
     .filter(b => b.conf < P.lowconf && b.ch !== ' ' && !isMark(b.ch)
       && !edits.some(e => Math.abs(b.x - e.x) <= P.win * pt))
     .map(b => [b.ch, pyRound(b.x), pyRound(b.conf, 2)]);
-  return { text, edits, flags };
+  return { text, edits, flags, merged: chars.filter(t => t.ch !== '') };
 }
 
 /** Signs only `new` reads (conf >= candConf), not applied, with none of that sign in the base nearby. */

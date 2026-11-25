@@ -58,4 +58,19 @@ test('real models: base text kept, per-model readings returned',
     assert.strictEqual(r.models.base.normalize('NFD').includes('ἀλλὰ ἀλόγῳ'.normalize('NFD')), true);
     assert.match(r.models.spec, /_/);            // the letter-masked reader emits "_" for letters
     assert.ok(Array.isArray(r.edits) && Array.isArray(r.candidates));
+    assert.strictEqual(r.chars.map(c => c.char).join(''), r.text); // chars line up with the merged text
   });
+
+test('chars follow the merged text: inserted sign gets a span, substituted char its confidence', async () => {
+  const lowBase = {
+    _meta: { height: 64 },
+    async recognize() { return { text: 'ab;d', chars: [['a', .99], ['b', .99], [';', .3], ['d', .99]].map(([char, conf], i) => ({ char, conf, x0: i * 10, x1: i * 10 + 8 })) }; },
+  };
+  const sign = text => ({ _meta: { height: 64 }, async recognize() { return { text, chars: [...text].map((char, i) => ({ char, conf: .98, x0: i * 10, x1: i * 10 + 8 })) }; } });
+  const m = new MultiRecognizer({ base: lowBase, new: sign('ab[d'), spec: sign('__[_') });
+  const r = await m.recognize(Buffer.alloc(0));
+  assert.strictEqual(r.text, 'ab[d');
+  assert.deepStrictEqual(r.chars.map(c => c.char), ['a', 'b', '[', 'd']);
+  assert.strictEqual(r.chars[2].conf, 0.98);
+  assert.deepStrictEqual([r.chars[2].x0, r.chars[2].x1], [20, 28]); // span of the substituted base char
+});

@@ -1,6 +1,6 @@
 'use strict';
 const { KrakenRecognizer } = require('./recognizer');
-const { spikes, merge, candidates } = require('./merge');
+const { spikes, pitch, merge, candidates } = require('./merge');
 
 const ROLES = ['base', 'new', 'spec'];
 
@@ -44,10 +44,19 @@ class MultiRecognizer {
     const bs = this._spikes('base', b.chars);
     const ns = this._spikes('new', n.chars);
     const ss = this._spikes('spec', s.chars);
-    const { text, edits, flags } = merge(bs, ns, ss, this._params);
+    const { text, edits, flags, merged } = merge(bs, ns, ss, this._params);
+    // One entry per character of `text`: base characters keep their span, an inserted sign gets
+    // half a pitch around its spike, and a substituted one the confidence of the sign.
+    const half = pitch(bs) / 4;
+    const chars = merged.map(t => {
+      const conf = Math.round(t.conf * 1000) / 1000;
+      if (t.src === undefined) return { char: t.ch, conf, x0: Math.max(0, Math.round(t.x - half)), x1: Math.round(t.x + half) };
+      const { x0, x1 } = b.chars[t.src];
+      return { char: t.ch, conf, x0, x1 };
+    });
     return {
       text,
-      chars: b.chars,
+      chars,
       edits,
       candidates: candidates(bs, ns, edits, this._params),
       lowconf: flags,
