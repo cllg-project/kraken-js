@@ -4,6 +4,7 @@ const sharp = require('sharp');
 const { KrakenSegmenter } = require('./segmenter');
 const { KrakenRecognizer } = require('./recognizer');
 const { ReadingOrder } = require('./readingorder');
+const { MultiRecognizer } = require('./multirecognizer');
 
 /**
  * End-to-end OCR pipeline: segment a page image, deskew line crops, and recognize text.
@@ -20,7 +21,9 @@ class KrakenPipeline {
    * Create a pipeline from two `.js_mlmodel` files.
    *
    * @param {string} segmenterPath   Path to the segmentation model
-   * @param {string} recognizerPath  Path to the recognition model
+   * @param {string|{base:string,new:string,spec:string}} recognizerPath  Path to the recognition
+   *   model, or three paths to read with {@link MultiRecognizer} (CTC-spike agreement merge;
+   *   merge parameters in `opts.recognizer.merge`; `threads` is then split across the 3 models)
    * @param {object} [opts]
    * @param {number}   [opts.expandUp=0.85]    Fraction of estimated line height to include above baseline
    * @param {number}   [opts.expandDown=0.35]  Fraction of estimated line height to include below baseline
@@ -53,7 +56,9 @@ class KrakenPipeline {
     if (opts.allowSpinning !== undefined) shared.allowSpinning = opts.allowSpinning;
     const [segmenter, recognizer, readingOrder] = await Promise.all([
       KrakenSegmenter.create(segmenterPath, { ...shared, ...(opts.segmenter || {}) }),
-      KrakenRecognizer.create(recognizerPath, { ...shared, ...(opts.recognizer || {}) }),
+      typeof recognizerPath === 'string'
+        ? KrakenRecognizer.create(recognizerPath, { ...shared, ...(opts.recognizer || {}) })
+        : MultiRecognizer.create(recognizerPath, { ...shared, ...(opts.recognizer || {}) }),
       opts.readingOrder ? ReadingOrder.create(opts.readingOrder, shared) : null,
     ]);
     return new KrakenPipeline(segmenter, recognizer, opts, readingOrder);
@@ -114,13 +119,12 @@ class KrakenPipeline {
 
     const recognized = await Promise.all(crops.map(({ buffer }) => this._recognizer.recognize(buffer)));
 
-    return lines.map(({ obb, type }, i) => ({
-      obb,
-      polygon: crops[i].polygon,
-      type,
-      text: recognized[i].text,
-      chars: recognized[i].chars,
-    }));
+    return lines.map(({ obb, type }, i) => {
+      const { text, chars, edits, candidates, lowconf, models } = recognized[i];
+      const out = { obb, polygon: crops[i].polygon, type, text, chars };
+      if (edits) Object.assign(out, { edits, candidates, lowconf, models });
+      return out;
+    });
   }
 }
 

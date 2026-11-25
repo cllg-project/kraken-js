@@ -1,7 +1,9 @@
 'use strict';
 const { KrakenRecognizer } = require('./recognizer');
+const { MultiRecognizer } = require('./multirecognizer');
 const { KrakenSegmenter } = require('./segmenter');
 const { KrakenPipeline } = require('./pipeline');
 const { DFineSegmenter } = require('./dfine');
 const { ReadingOrder } = require('./readingorder');
-module.exports = { KrakenRecognizer, KrakenSegmenter, KrakenPipeline, DFineSegmenter, ReadingOrder };
+const { merge, candidates } = require('./merge');
+module.exports = { KrakenRecognizer, MultiRecognizer, KrakenSegmenter, KrakenPipeline, DFineSegmenter, ReadingOrder, merge, candidates };

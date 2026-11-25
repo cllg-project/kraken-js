@@ -402,6 +402,19 @@ const pipeline = await KrakenPipeline.create(segPath, recPath, {
 });
 ```
 
+## Multi-model reading (CTC-spike agreement)
+
+Port of [cllg-multimodel-run](../cllg-multimodel-run): three recognisers read each line — `base` (its text is kept), `new` (fine-tuned on rare editorial signs) and `spec` (letters masked to `_`). A sign (`[ ] { } < > || + † « »`) enters the text only where `new` and `spec` emit it at the same x; a confident base character is never overwritten.
+
+```js
+const pipe = await KrakenPipeline.create('seg.js_mlmodel',
+  { base: 'cllg-3.js_mlmodel', new: 'signs-r2.js_mlmodel', spec: 'letters-masked.js_mlmodel' },
+  { threads: 6, recognizer: { merge: { tau: 0.9, tol: 2.0 } } });  // threads is the total, split over the 3 models
+const lines = await pipe.process('page.png'); // + edits, candidates, lowconf, models per line
+```
+
+Export each model with `export_kraken_onnx.py`. `||` must be read as two `|` and `< >` as ASCII. Cost is about 3x one recogniser. Merge parameters were tuned on one book; the pure functions are in `src/merge.js` (`merge`, `candidates`) and tested against golden output of the Python implementation (`tests/fixtures/merge_golden.json`).
+
 ## Preprocessing
 
 Kraken's VGSL and PP-OCR models share the same normalization: pixels are divided by 255 then inverted (`value = 1 − pixel/255`), matching Kraken's `tensor_invert` transform. D-FINE models are the exception: they take plain `pixel/255`.
